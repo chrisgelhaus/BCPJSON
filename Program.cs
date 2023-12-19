@@ -1,15 +1,11 @@
-﻿//using Ionic.Zip;
-//using Microsoft.SqlServer.Types;
-using Newtonsoft.Json;
+﻿using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Data;
-using System.Data.SqlClient;
-//using System.Data.SqlTypes;
+using Microsoft.Data.SqlClient;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-//using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.SqlServer.Management.Smo;
@@ -26,8 +22,6 @@ namespace bcpJson
                 .WithParsed<ExportOptions>(opts => ExportData(opts))
                 .WithParsed<ImportOptions>(opts => ImportData(opts))
                 .WithParsed<CopyOptions>(opts => CopyData(opts));
-
-            Console.ReadLine();
         }
 
         private static void ExportData(ExportOptions opts)
@@ -189,7 +183,7 @@ namespace bcpJson
                             //    srcTable.Checks.Remove(check);
                             //}
                             trnsfrTable.ObjectList.Add(srcTable);
-                            foreach (Index index in srcTable.Indexes)
+                            foreach (Microsoft.SqlServer.Management.Smo.Index index in srcTable.Indexes)
                             {
                                 trnsfrTable.ObjectList.Add(index);
                             }
@@ -227,7 +221,7 @@ namespace bcpJson
                     {
                         if (srcTable.HasClusteredIndex)
                         {
-                            foreach (Index index in srcTable.Indexes)
+                            foreach (Microsoft.SqlServer.Management.Smo.Index index in srcTable.Indexes)
                             {
                                 if (index.IsClustered)
                                 {
