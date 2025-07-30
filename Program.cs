@@ -14,9 +14,10 @@ using CommandLine;
 
 namespace bcpJson
 {
-	class Program
-	{
-		static void Main(string[] args)
+        class Program
+        {
+            private static StreamWriter logWriter = null;
+            static void Main(string[] args)
 		{
             CommandLine.Parser.Default.ParseArguments<ExportOptions,ImportOptions,CopyOptions>(args)
                 .WithParsed<ExportOptions>(opts => ExportData(opts))
@@ -28,6 +29,10 @@ namespace bcpJson
         {
             if (opts.Valid())
             {
+                if (!string.IsNullOrEmpty(opts.outputLogFile))
+                {
+                    logWriter = new StreamWriter(opts.outputLogFile, false);
+                }
                 Stopwatch sw = new Stopwatch();
                 sw.Start();
 
@@ -48,6 +53,11 @@ namespace bcpJson
                 }
                 sw.Stop();
                 PostToConsole(string.Format("Total Exported: {0}\tRows in {1}", result, sw.Elapsed), InfoLevel.Success);
+                if (logWriter != null)
+                {
+                    logWriter.Dispose();
+                    logWriter = null;
+                }
             }
         }
 
@@ -55,6 +65,10 @@ namespace bcpJson
         {
             if (opts.Valid())
             {
+                if (!string.IsNullOrEmpty(opts.LogFile))
+                {
+                    logWriter = new StreamWriter(opts.LogFile, false);
+                }
                 Stopwatch sw = new Stopwatch();
                 sw.Start();
 
@@ -72,11 +86,20 @@ namespace bcpJson
                 }
                 sw.Stop();
                 PostToConsole(string.Format("Total Imported {0}\tRows in {1}", result, sw.Elapsed), InfoLevel.Success);
+                if (logWriter != null)
+                {
+                    logWriter.Dispose();
+                    logWriter = null;
+                }
             }
         }
 
         private static void CopyData(CopyOptions opts)
         {
+            if (!string.IsNullOrEmpty(opts.outputLogFile))
+            {
+                logWriter = new StreamWriter(opts.outputLogFile, false);
+            }
             Stopwatch sw = new Stopwatch();
             sw.Start();
 
@@ -85,6 +108,11 @@ namespace bcpJson
             var result = BulkCopyTables(opts);
             sw.Stop();
             PostToConsole(string.Format("Total Copied {0}\tRows in {1}", result, sw.Elapsed), InfoLevel.Success);
+            if (logWriter != null)
+            {
+                logWriter.Dispose();
+                logWriter = null;
+            }
         }
 
         private static long Generate(ExportOptions setting)
@@ -1308,6 +1336,11 @@ namespace bcpJson
             Console.ForegroundColor = consoleColor;
             Console.WriteLine(Message);
             Console.ResetColor();
+            if (logWriter != null)
+            {
+                logWriter.WriteLine(Message);
+                logWriter.Flush();
+            }
             return true;
         }
     }
