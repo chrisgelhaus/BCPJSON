@@ -14,8 +14,9 @@ using CommandLine;
 
 namespace bcpJson
 {
-	class Program
-	{
+    class Program
+    {
+        private static string LogFilePath = string.Empty;
 		static void Main(string[] args)
 		{
             CommandLine.Parser.Default.ParseArguments<ExportOptions,ImportOptions,CopyOptions>(args)
@@ -28,6 +29,7 @@ namespace bcpJson
         {
             if (opts.Valid())
             {
+                LogFilePath = opts.outputLogFile;
                 Stopwatch sw = new Stopwatch();
                 sw.Start();
 
@@ -55,6 +57,7 @@ namespace bcpJson
         {
             if (opts.Valid())
             {
+                LogFilePath = opts.LogFile;
                 Stopwatch sw = new Stopwatch();
                 sw.Start();
 
@@ -77,6 +80,7 @@ namespace bcpJson
 
         private static void CopyData(CopyOptions opts)
         {
+            LogFilePath = opts.outputLogFile;
             Stopwatch sw = new Stopwatch();
             sw.Start();
 
@@ -427,7 +431,7 @@ namespace bcpJson
                                     using (SqlBulkCopy bulkCopy = new SqlBulkCopy(destinationConnection))
                                     {
                                         bulkCopy.DestinationTableName = "dbo.pc_user";
-                                        bulkCopy.BatchSize = 1000;
+                                        bulkCopy.BatchSize = setting.BatchSize;
                                         try
                                         {
                                             bulkCopy.NotifyAfter = 1000;
@@ -616,7 +620,7 @@ namespace bcpJson
                                     using (SqlBulkCopy bulkCopy = new SqlBulkCopy(targetSQLConnectionString, SqlBulkCopyOptions.KeepIdentity))
                                     {
                                         bulkCopy.DestinationTableName = string.Format("{1}.{0}", targetTable.Name, targetTable.Schema);
-                                        bulkCopy.BatchSize = 1000;
+                                        bulkCopy.BatchSize = setting.BatchSize;
                                         try
                                         {
                                             var tableConn = new SqlConnection(sourceSQLConnectionString);
@@ -1308,6 +1312,19 @@ namespace bcpJson
             Console.ForegroundColor = consoleColor;
             Console.WriteLine(Message);
             Console.ResetColor();
+
+            if (!string.IsNullOrEmpty(LogFilePath))
+            {
+                try
+                {
+                    File.AppendAllText(LogFilePath, Message + Environment.NewLine);
+                }
+                catch
+                {
+                    // ignore logging errors
+                }
+            }
+
             return true;
         }
     }

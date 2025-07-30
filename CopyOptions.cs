@@ -59,6 +59,9 @@ namespace bcpJson
         [Option("max-tasks", Default = -1, Required = false, HelpText = "Maximum parallel tasks.")]
         public int MaxParallelTasks { get; set; }
 
+        [Option("batch-size", Default = 1000, Required = false, HelpText = "Bulk copy batch size.")]
+        public int BatchSize { get; set; }
+
         [Option("log-file", Required = false, HelpText = "Name of output log file.")]
         public string outputLogFile { get; set; }
         public string SourceConnectionString()

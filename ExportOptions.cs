@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.SqlClient;
+using System.IO;
 
 namespace bcpJson
 {
@@ -88,7 +89,20 @@ namespace bcpJson
                 return false;
             }
 
-            //TODO: PATH
+            if (!string.IsNullOrEmpty(this.exportPath))
+            {
+                try
+                {
+                    if (!Directory.Exists(this.exportPath))
+                    {
+                        Directory.CreateDirectory(this.exportPath);
+                    }
+                }
+                catch
+                {
+                    return false;
+                }
+            }
 
             using (var srcconn = new SqlConnection(this.SourceConnectionString()))
             {
