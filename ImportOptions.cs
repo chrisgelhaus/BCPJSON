@@ -27,7 +27,7 @@ namespace bcpJson
         [Option("target-login", Default = "", Required = false, HelpText = "Specifies the login ID used to connect to target SQL Server. Leave blank for Windows Auth.")]
         public string TargetSQLLogin { get; set; }
 
-        [Option("target-password ", Default = "", Required = false, HelpText = "Specifies the password for the target login ID. Leave blank for Windows Auth.")]
+        [Option("target-password", Default = "", Required = false, HelpText = "Specifies the password for the target login ID. Leave blank for Windows Auth.")]
         public string TargetSQLPassword { get; set; }
 
         [Option("target-table", Required = false, HelpText = "Target table name.")]

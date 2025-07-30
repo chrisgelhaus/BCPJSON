@@ -17,7 +17,7 @@ namespace bcpJson
         [Option("source-login", Default = "", Required = false, HelpText = "Specifies the login ID used to connect to source SQL Server. Leave blank for Windows Auth.")]
         public string srcLogin { get; set; }
 
-        [Option("source-password ", Default = "", Required = false, HelpText = "Specifies the password for the source login ID. Leave blank for Windows Auth.")]
+        [Option("source-password", Default = "", Required = false, HelpText = "Specifies the password for the source login ID. Leave blank for Windows Auth.")]
         public string srcPassword { get; set; }
 
         [Option("target-server", Required = false, HelpText = "Specifies the target instance of SQL Server to which to connect.")]
@@ -29,7 +29,7 @@ namespace bcpJson
         [Option("target-login", Default = "", Required = false, HelpText = "Specifies the login ID used to connect to target SQL Server. Leave blank for Windows Auth.")]
         public string TargetSQLLogin { get; set; }
 
-        [Option("target-password ", Default = "", Required = false, HelpText = "Specifies the password for the target login ID. Leave blank for Windows Auth.")]
+        [Option("target-password", Default = "", Required = false, HelpText = "Specifies the password for the target login ID. Leave blank for Windows Auth.")]
         public string TargetSQLPassword { get; set; }
 
         [Option("source-query", Required = false, HelpText = "Transact-SQL query/procedure. If the query returns multiple result sets, only the first result set is copied to the data file; subsequent result sets are ignored.")]
