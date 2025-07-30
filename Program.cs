@@ -35,7 +35,7 @@ namespace bcpJson
                 //var result = CollectionGenerate2(opts);
 
                 long result = -1;
-                switch (opts.FileFormat)
+                switch (opts.FileFormat.ToLowerInvariant())
                 {
                     case "bcp":
                         result = ExportToBCP(opts);
@@ -59,7 +59,7 @@ namespace bcpJson
                 sw.Start();
 
                 long result = -1;
-                switch (opts.FileFormat)
+                switch (opts.FileFormat.ToLowerInvariant())
                 {
                     case "bcp":
                         result = ImportFromBCP(opts);

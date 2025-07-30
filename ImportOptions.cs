@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data.SqlClient;
+using System.IO;
 
 
 namespace bcpJson
@@ -58,7 +59,15 @@ namespace bcpJson
             //    return false;
             //}
 
-            //TODO: PATH
+            if (string.IsNullOrEmpty(this.SourcePath))
+            {
+                this.SourcePath = Directory.GetCurrentDirectory();
+            }
+
+            if (!Directory.Exists(this.SourcePath))
+            {
+                return false;
+            }
 
             using (var tgtconn = new SqlConnection(this.GetTargetConnectionString()))
             {
