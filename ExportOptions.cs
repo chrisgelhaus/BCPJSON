@@ -51,6 +51,9 @@ namespace bcpJson
         [Option("log-file", Required = false, HelpText = "Name of output log file.")]
         public string outputLogFile { get; set; }
 
+        [Option("max-tasks", Default = -1, Required = false, HelpText = "Maximum parallel table operations.")]
+        public int MaxParallelTasks { get; set; }
+
         public string SourceConnectionString()
         {
             if (this.srcLogin == "" && this.srcPassword == "")
