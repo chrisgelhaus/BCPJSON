@@ -14,10 +14,12 @@ using CommandLine;
 
 namespace bcpJson
 {
-	class Program
-	{
-		static void Main(string[] args)
-		{
+        class Program
+        {
+        private static readonly object _logLock = new object();
+        private static string _logFilePath;
+                static void Main(string[] args)
+                {
             CommandLine.Parser.Default.ParseArguments<ExportOptions,ImportOptions,CopyOptions>(args)
                 .WithParsed<ExportOptions>(opts => ExportData(opts))
                 .WithParsed<ImportOptions>(opts => ImportData(opts))
@@ -28,6 +30,7 @@ namespace bcpJson
         {
             if (opts.Valid())
             {
+                SetLogFile(opts.outputLogFile);
                 Stopwatch sw = new Stopwatch();
                 sw.Start();
 
@@ -55,6 +58,7 @@ namespace bcpJson
         {
             if (opts.Valid())
             {
+                SetLogFile(opts.LogFile);
                 Stopwatch sw = new Stopwatch();
                 sw.Start();
 
@@ -77,6 +81,7 @@ namespace bcpJson
 
         private static void CopyData(CopyOptions opts)
         {
+            SetLogFile(opts.outputLogFile);
             Stopwatch sw = new Stopwatch();
             sw.Start();
 
@@ -321,7 +326,10 @@ namespace bcpJson
                         dt.Load(reader);
                         var list = dt.AsEnumerable().Select(r => r.Field<int>("object_id")).ToArray();
 
-                        Parallel.ForEach(list, table =>
+                        Parallel.ForEach(
+                            list,
+                            new ParallelOptions { MaxDegreeOfParallelism = options.MaxParallelTasks },
+                            table =>
                         {
                             Thread.Sleep(10);
 
@@ -678,7 +686,10 @@ namespace bcpJson
                         dt.Load(reader);
                         var list = dt.AsEnumerable().Select(r => r.Field<int>("object_id")).ToArray();
 
-                        Parallel.ForEach(list, objectID =>
+                        Parallel.ForEach(
+                            list,
+                            new ParallelOptions { MaxDegreeOfParallelism = options.MaxParallelTasks },
+                            objectID =>
                         {
                             Thread.Sleep(10);
 
@@ -899,7 +910,10 @@ namespace bcpJson
                 FileInfo[] files = workingFolder.GetFiles(string.Format("{0}", options.SourceFile), SearchOption.TopDirectoryOnly);
                 var list = files.AsEnumerable().Select(f => f.Name).ToArray();
 
-                Parallel.ForEach(files, file =>
+                Parallel.ForEach(
+                    files,
+                    new ParallelOptions { MaxDegreeOfParallelism = options.MaxParallelTasks },
+                    file =>
                 {
                     Thread.Sleep(10);
 
@@ -1277,6 +1291,22 @@ namespace bcpJson
             return exitCode;
         }
 
+        private static void SetLogFile(string path)
+        {
+            _logFilePath = string.IsNullOrWhiteSpace(path) ? null : path;
+            if (!string.IsNullOrEmpty(_logFilePath))
+            {
+                try
+                {
+                    File.AppendAllText(_logFilePath, $"Log started {DateTime.Now}{Environment.NewLine}");
+                }
+                catch
+                {
+                    _logFilePath = null;
+                }
+            }
+        }
+
         public enum InfoLevel
         {
             Info,
@@ -1308,6 +1338,13 @@ namespace bcpJson
             Console.ForegroundColor = consoleColor;
             Console.WriteLine(Message);
             Console.ResetColor();
+            if (!string.IsNullOrEmpty(_logFilePath))
+            {
+                lock (_logLock)
+                {
+                    File.AppendAllText(_logFilePath, Message + Environment.NewLine);
+                }
+            }
             return true;
         }
     }
