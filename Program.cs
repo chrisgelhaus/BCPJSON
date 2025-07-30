@@ -328,7 +328,7 @@ namespace bcpJson
 
                         Parallel.ForEach(
                             list,
-                            new ParallelOptions { MaxDegreeOfParallelism = options.MaxParallelTasks },
+                            new ParallelOptions { MaxDegreeOfParallelism = setting.MaxParallelTasks },
                             table =>
                         {
                             Thread.Sleep(10);
