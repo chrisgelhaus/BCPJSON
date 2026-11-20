@@ -20,7 +20,8 @@ dotnet publish src/BcpJson -c Release             # single-file exe (PublishSing
 ```
 
 - Target framework: `net8.0`. Assembly name `bcpjson`; debug output `src/BcpJson/bin/Debug/net8.0/bcpjson.dll` (used by `.vscode/launch.json`).
-- **Runtime prerequisite (Windows):** `bcp.exe` must be on `PATH` for the BCP export/import paths and for copying tables with CLR-type columns. Windows Auth is the default when no login/password is given.
+- **CI:** `.github/workflows/ci.yml` builds with warnings as errors and runs unit tests on Ubuntu and Windows, then an Ubuntu integration job against a SQL Server 2022 service container runs `tests/integration/roundtrip.sh` (`setup`, `json`, `bcp`, `copy`): it builds `BcpJsonSource` from `schema.sql` + `data.sql` and diffs JSON exports after each round trip. Add awkward data there when fixing a data-fidelity bug. The scripts can be run against any SQL Server with `SQL_SERVER`, `SQL_PASSWORD` and `BCPJSON` set.
+- **Runtime prerequisite:** `bcp` (Windows `bcp.exe`, or mssql-tools18 on Linux) must be on `PATH` for the BCP export/import paths and for copying tables with CLR-type columns. Windows Auth is the default when no login/password is given.
 - **Tests:** `tests/BcpJson.Tests` (xUnit) covers the pure helpers; it sees `internal` members via `InternalsVisibleTo`. Make a helper `internal` (not `private`) when it needs a test. The owner has **no local SQL Server**: anything needing a database runs in the GitHub Actions integration job (SQL Server service container).
 
 ## CLI verbs (CommandLineParser 2.9)
@@ -60,8 +61,7 @@ All verbs share `--trust-server-certificate` and `--log-file`. `Main` returns ex
 
 ## Remaining known issues
 
-- `.github/workflows/dotnet.yml` still targets .NET 6.0.x (fails on the net8.0 projects); to be replaced by `ci.yml` (ROADMAP step 5). No database integration tests yet.
-- bcp.exe requires SQL passwords on the command line (`-P`).
+- bcp requires SQL passwords on the command line (`-P`).
 - BCP char format with `|` delimiter can't round-trip data containing `|` or newlines; `bcp out` output is unordered.
 - JSON loses geography/geometry SRID; `sql_variant` re-imports as nvarchar.
 - `copy --source-query` and export `-k` are accepted but not implemented.

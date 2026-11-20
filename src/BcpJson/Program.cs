@@ -113,7 +113,13 @@ namespace bcpJson
         }
 
         /// <summary>
-        /// Runs an external tool (bcp.exe) and returns its exit code, or -1 if it could not be started.
+        /// The bcp utility, found on PATH. No extension, so it resolves to bcp.exe on Windows and to the
+        /// mssql-tools18 bcp on Linux/macOS.
+        /// </summary>
+        private const string BcpTool = "bcp";
+
+        /// <summary>
+        /// Runs an external tool (bcp) and returns its exit code, or -1 if it could not be started.
         /// </summary>
         private static int ExecuteProcess(string command, string arguments, string workingDirectory)
         {

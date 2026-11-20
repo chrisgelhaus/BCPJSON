@@ -26,7 +26,7 @@ After reading about how Facebook backs up its MySQL fleet at scale — and, just
 
 ## Requirements
 
-- Windows (the BCP paths call `bcp.exe`).
+- Windows. The BCP paths call `bcp`; they also run on Linux with mssql-tools18, which is how CI tests them.
 - [.NET 8 SDK](https://dotnet.microsoft.com/download) to build, or the .NET 8 runtime to run a framework-dependent build.
 - For `--file-format bcp` and for `copy` of tables with geography/geometry/hierarchyid columns: the SQL Server **bcp utility** on `PATH` (installed with SQL Server or the *Microsoft Command Line Utilities for SQL Server*).
 - SQL Server 2008 or later.

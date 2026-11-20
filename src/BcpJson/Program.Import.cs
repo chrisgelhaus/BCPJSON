@@ -72,7 +72,7 @@ namespace bcpJson
                     string args = string.Format("{0} in {1} -f {2} {3} -E -k -b 10000 -e {4} -o {5}",
                         Arg(qualifiedName), Arg(file.Name), Arg(formatFile), connectionArgs, Arg(baseFileName + "_import_error.log"), Arg(outputLog));
 
-                    if (ExecuteProcess("bcp.exe", args, workingPath) == 0)
+                    if (ExecuteProcess(BcpTool, args, workingPath) == 0)
                     {
                         long rows = ReadBcpRowCount(Path.Combine(workingPath, outputLog));
                         if (rows > 0)

@@ -220,7 +220,7 @@ SELECT @Columns, @SortOrder;";
                 // Format file (used by import to map columns)
                 string formatArgs = string.Format("{0} format nul {1} -c -x -f {2} -t|",
                     Arg(table.QuotedName), connectionArgs, Arg(name + "-c.xml"));
-                if (ExecuteProcess("bcp.exe", formatArgs, outputPath) != 0)
+                if (ExecuteProcess(BcpTool, formatArgs, outputPath) != 0)
                 {
                     PostToConsole(string.Format("{0}: Error creating format file.", name), InfoLevel.Error);
                     return;
@@ -231,7 +231,7 @@ SELECT @Columns, @SortOrder;";
                 string outputLog = name + "_output.log";
                 string exportArgs = string.Format("{0} out {1} {2} -c -t| -m 1 -b 10000 -K ReadOnly -e {3} -o {4}",
                     Arg(table.QuotedName), Arg(name + ".bcp"), connectionArgs, Arg(name + "_error.log"), Arg(outputLog));
-                if (ExecuteProcess("bcp.exe", exportArgs, outputPath) == 0)
+                if (ExecuteProcess(BcpTool, exportArgs, outputPath) == 0)
                 {
                     long rows = ReadBcpRowCount(Path.Combine(outputPath, outputLog));
                     if (rows > 0)
@@ -263,7 +263,7 @@ SELECT @Columns, @SortOrder;";
             string args = string.Format("{0} queryout {1} {2} -c -t| -m 1 -b 10000 -K ReadOnly -e {3} -o {4}",
                 Arg(options.Query), Arg(name + ".bcp"), connectionArgs, Arg(name + "_error.log"), Arg(outputLog));
 
-            if (ExecuteProcess("bcp.exe", args, options.exportPath) != 0)
+            if (ExecuteProcess(BcpTool, args, options.exportPath) != 0)
             {
                 PostToConsole(string.Format("{0}: bcp export failed. See {0}_error.log and {1}.", name, outputLog), InfoLevel.Error);
                 return -1;
