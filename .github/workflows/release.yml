@@ -32,7 +32,7 @@ jobs:
       prerelease: ${{ steps.v.outputs.prerelease }}
       publish: ${{ steps.v.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -91,9 +91,9 @@ jobs:
             exe: bcpjson
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
 
@@ -122,7 +122,7 @@ jobs:
           # A usage error must exit 1.
           if "$exe" no-such-verb > /dev/null 2>&1; then echo "::error::unknown verb did not fail"; exit 1; fi
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.rid }}
           path: out/${{ matrix.exe }}
@@ -140,9 +140,9 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: bin-*
           path: bin
@@ -175,7 +175,7 @@ jobs:
 
       - name: Attest build provenance
         if: needs.version.outputs.publish == 'true'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/*
 
@@ -191,7 +191,7 @@ jobs:
 
       - name: Upload packages (dry run)
         if: needs.version.outputs.publish != 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-packages-dryrun
           path: dist
