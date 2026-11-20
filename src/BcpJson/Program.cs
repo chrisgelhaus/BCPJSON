@@ -28,7 +28,17 @@ namespace bcpJson
                     (ExportOptions opts) => ExportData(opts),
                     (ImportOptions opts) => ImportData(opts),
                     (CopyOptions opts) => CopyData(opts),
-                    errors => 1);
+                    ExitCodeForParseErrors);
+        }
+
+        /// <summary>
+        /// CommandLineParser reports --help and --version as "errors"; those are successful runs (exit 0).
+        /// Anything else (unknown verb, missing required option, bad value) is exit 1.
+        /// </summary>
+        internal static int ExitCodeForParseErrors(IEnumerable<Error> errors)
+        {
+            var list = errors.ToList();
+            return list.IsHelp() || list.IsVersion() ? 0 : 1;
         }
 
         private static int ExportData(ExportOptions opts)
