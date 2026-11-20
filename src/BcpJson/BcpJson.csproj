@@ -10,10 +10,19 @@
     <Nullable>disable</Nullable>
     <PublishTrimmed>false</PublishTrimmed>
     <PublishSingleFile>true</PublishSingleFile>
-    <Version>2.0.0.0</Version>
+    <!-- Development version. Releases override it from the git tag (release.yml passes -p:Version etc.). -->
+    <Version>2.0.0</Version>
     <Authors>Chris Gelhaus</Authors>
     <Copyright>Copyright 2019-2026 Chris Gelhaus</Copyright>
     <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+  </PropertyGroup>
+
+  <!-- Publishing for a runtime (dotnet publish -r <rid>): one self-contained executable, no .NET install needed. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>embedded</DebugType>
   </PropertyGroup>
 
   <ItemGroup>

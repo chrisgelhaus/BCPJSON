@@ -13,14 +13,14 @@
 #   SQL_SERVER    (default localhost)
 #   SQL_USER      (default sa)
 #   SQL_PASSWORD  required
-#   BCPJSON       required: path to bcpjson.dll
+#   BCPJSON       required: path to bcpjson.dll (run with dotnet) or a published bcpjson executable
 #   WORK          (default ${RUNNER_TEMP:-/tmp}/bcpjson-roundtrip) output folder, kept for inspection
 set -euo pipefail
 
 SQL_SERVER="${SQL_SERVER:-localhost}"
 SQL_USER="${SQL_USER:-sa}"
 : "${SQL_PASSWORD:?SQL_PASSWORD is required}"
-: "${BCPJSON:?BCPJSON (path to bcpjson.dll) is required}"
+: "${BCPJSON:?BCPJSON (path to bcpjson.dll or the bcpjson executable) is required}"
 WORK="${WORK:-${RUNNER_TEMP:-/tmp}/bcpjson-roundtrip}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
@@ -37,7 +37,11 @@ TARGET=(--target-server "$SQL_SERVER" --target-login "$SQL_USER" --target-passwo
 bcpjson() {
     local shown="$*"
     echo "+ bcpjson ${shown//"$SQL_PASSWORD"/***}"
-    dotnet "$BCPJSON" "$@" --trust-server-certificate
+    if [[ "$BCPJSON" == *.dll ]]; then
+        dotnet "$BCPJSON" "$@" --trust-server-certificate
+    else
+        "$BCPJSON" "$@" --trust-server-certificate
+    fi
 }
 
 # Exports every table of a database (or the given schemas) to JSON in a folder.

@@ -5,6 +5,8 @@ on:
     branches: [master]
   pull_request:
   workflow_dispatch:
+  # release.yml runs the full suite before publishing anything.
+  workflow_call:
 
 permissions:
   contents: read
@@ -59,7 +61,8 @@ jobs:
       # Throwaway password for the ephemeral CI container only; not a secret.
       SQL_PASSWORD: BcpJson-CI-2026x
       SQL_SERVER: localhost,1433
-      BCPJSON: ${{ github.workspace }}/src/BcpJson/bin/Release/net8.0/bcpjson.dll
+      # The integration tests run the self-contained single-file executable, exactly as releases ship it.
+      BCPJSON: ${{ github.workspace }}/publish/bcpjson
       # roundtrip.sh writes to $RUNNER_TEMP/bcpjson-roundtrip
     services:
       mssql:
@@ -77,8 +80,11 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Build
-        run: dotnet build src/BcpJson/BcpJson.csproj -c Release
+      - name: Publish linux-x64 single-file executable
+        run: |
+          dotnet publish src/BcpJson/BcpJson.csproj -c Release -r linux-x64 -o publish
+          ls -l publish
+          ./publish/bcpjson --version
 
       - name: Install sqlcmd and bcp
         run: bash tests/integration/install-mssql-tools.sh
