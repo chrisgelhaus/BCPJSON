@@ -168,4 +168,6 @@ Each file is a JSON array with one object per row, one row per line:
 
 ## License
 
-No license has been chosen yet; all rights reserved by the author until one is added.
+Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2019-2026 Chris Gelhaus.
+
+You are free to use, modify and redistribute bcpJson, including commercially. If you redistribute it or a derivative, keep the copyright notice and include the [NOTICE](NOTICE) file, as the license requires.

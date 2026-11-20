@@ -9,17 +9,20 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 - New: JSON import, `--trust-server-certificate`, exit code 1 on any error, export with no include filter = all tables.
 - Removed packages: DotNetZip (unused), System.Data.SqlClient (consolidated on Microsoft.Data.SqlClient). sqlcmd.exe no longer required.
 - README rewritten; CLAUDE.md added.
-- **Not yet compiled** — the refactor was written without a .NET SDK. First task: `dotnet build`, fix any errors, then a manual export → import → export round trip.
+- `dotnet build -c Release` verified on the dev machine (SDK 8.0.134): 0 warnings, 0 errors; `export --help` runs.
+- `.gitattributes` added and line endings renormalized (index LF; `.cs`/`.md`/`.json`/etc. CRLF on checkout, `.yml`/`.gitignore` LF).
+- **Round trip not yet run.** The dev machine has no SQL Server, bcp or Docker, and none will be installed: the CI integration job (step 5) is the first round trip.
 
 ## Decisions
 
 - CI/testing runs on GitHub Actions (repo is public, so standard runners are free). SQL Server for integration tests = service container (`mcr.microsoft.com/mssql/server:2022-latest`).
 - Releases are published as GitHub Releases from version tags.
+- No local SQL Server on the dev machine; all database testing happens in GitHub Actions.
 
 ## Next steps (in order)
 
-1. **Build and smoke test** on the dev machine (`dotnet build -c Release`).
-2. **Repo hygiene:** add `.gitattributes` (`*.cs text eol=crlf`, etc.) and renormalize, which clears the line-ending-only diffs in `.github/workflows/dotnet.yml` and `.vscode/*`. Add a LICENSE (MIT or Apache-2.0, owner's choice).
+1. ~~Smoke test locally~~ — dropped (no local SQL Server); covered by the CI integration job in step 5.
+2. ~~Repo hygiene~~ — done: `.gitattributes`, Apache-2.0 `LICENSE` + `NOTICE`.
 3. **Restructure for tests:** move the app to `src/BcpJson/`, add `tests/BcpJson.Tests` (xUnit) and a `.sln`; `InternalsVisibleTo` for helpers.
 4. **Unit tests (no DB):** `BuildSourceObjectIDList` (literals, wildcards, escaping, "no include = all"), `QuoteName`/`SqlLiteral`/`LikeLiteral`, `ReadJsonValue` for every SQL type, `SqlConnectionFactory.Build`, CLI parsing.
 5. **CI workflow** (`.github/workflows/ci.yml`): .NET 8, `actions/checkout@v4`, `actions/setup-dotnet@v4`, build Release with warnings as errors, unit tests; integration job with SQL Server 2022 service container + mssql-tools18 that creates a sample DB with awkward types, runs export(json) → import → export, and diffs the two exports. Change `bcp.exe` → `bcp` so bcp paths run on Linux too.
