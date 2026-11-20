@@ -86,8 +86,10 @@ namespace bcpJson
 
                     // -E keeps identity values and -k keeps NULLs, so the load is a faithful restore of the export.
                     // -h "TABLOCK" (default) enables minimal logging and avoids row/page locks.
+                    // -q sets QUOTED_IDENTIFIER ON (bcp defaults to OFF), which SQL Server requires for inserts into
+                    // tables with filtered, XML or spatial indexes, indexed views or indexed computed columns.
                     string outputLog = baseFileName + "_import_output.log";
-                    string args = string.Format("{0} in {1} -f {2} {3} -E -k -b 10000{4} -e {5}",
+                    string args = string.Format("{0} in {1} -f {2} {3} -E -k -q -b 10000{4} -e {5}",
                         Arg(qualifiedName), Arg(file.Name), Arg(formatFile), connectionArgs, BcpLoadHints(options.NoTableLock), Arg(baseFileName + "_import_error.log"));
 
                     if (ExecuteProcess(BcpTool, args, workingPath, outputLog) == 0)
