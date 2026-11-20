@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  build:
+    name: Build and unit test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore BcpJson.sln
+
+      - name: Build (warnings are errors)
+        run: dotnet build BcpJson.sln -c Release --no-restore -warnaserror
+
+      - name: Unit tests
+        run: dotnet test BcpJson.sln -c Release --no-build --logger trx --results-directory TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results-${{ matrix.os }}
+          path: TestResults
+          if-no-files-found: ignore
+
+  integration:
+    name: Round trip against SQL Server 2022
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Throwaway password for the ephemeral CI container only; not a secret.
+      SQL_PASSWORD: BcpJson-CI-2026x
+      SQL_SERVER: localhost,1433
+      BCPJSON: ${{ github.workspace }}/src/BcpJson/bin/Release/net8.0/bcpjson.dll
+      # roundtrip.sh writes to $RUNNER_TEMP/bcpjson-roundtrip
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: BcpJson-CI-2026x
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Build
+        run: dotnet build src/BcpJson/BcpJson.csproj -c Release
+
+      - name: Install sqlcmd and bcp
+        run: bash tests/integration/install-mssql-tools.sh
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 60); do
+            if sqlcmd -S "$SQL_SERVER" -U sa -P "$SQL_PASSWORD" -C -Q "SELECT 1" -b -o /dev/null; then
+              echo "SQL Server is ready after ${i} attempt(s)."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::SQL Server did not become ready."
+          docker logs "${{ job.services.mssql.id }}" || true
+          exit 1
+
+      - name: Create and export the source database
+        id: setup
+        run: bash tests/integration/roundtrip.sh setup
+
+      # The three round trips are independent: each runs whenever setup succeeded, so one failure
+      # does not hide the results of the others.
+      - name: JSON round trip (export, import, export)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: bash tests/integration/roundtrip.sh json
+
+      - name: BCP round trip (export, import, export)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: bash tests/integration/roundtrip.sh bcp
+
+      - name: Copy round trip (copy, export)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: bash tests/integration/roundtrip.sh copy
+
+      - name: Upload exported files
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: roundtrip-output
+          path: ${{ runner.temp }}/bcpjson-roundtrip
+          retention-days: 7
