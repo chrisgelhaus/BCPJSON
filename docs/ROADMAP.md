@@ -15,6 +15,11 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 - Fixes found by CI: Linux bcp has no `-x` (exports now write non-XML `-c.fmt`; import still accepts old `-c.xml`) and no `-o` (bcp stdout is captured in-process into the same `_output.log`).
 - Merged master (PRs #6–#12, Codex): already covered by the refactor except `--max-tasks` for export/import, which was ported via `Parallelism()`.
 
+## Done (branch `feature/copy-indexes`)
+
+- `copy` recreates primary keys, unique constraints and all index kinds on tables it creates, after the load (SMO scripting without filegroups, clustered first, XML/spatial after the PK). On by default; `--no-indexes` opts out. CI adds one index of every kind to the test schema, compares index definitions source vs copy (`tests/integration/indexes.sql`) and now compares copied data exactly (same order thanks to the PKs).
+- Not copied (possible future options): foreign keys, check constraints, triggers.
+
 ## Done (branch `feature/tablock-and-snapshot`)
 
 - TABLOCK by default for JSON import, BCP import (`-h "TABLOCK"`) and copy (previously only JSON import); `--no-table-lock` on import and copy for live targets or several loads into one clustered table.

@@ -1,0 +1,37 @@
+/*
+    One line per index/key of every user table, describing everything copy must reproduce:
+    name, type, uniqueness, PK/unique constraint, filter, key columns (with DESC), included columns, compression.
+    Run with: bcpjson export --source-query "$(cat indexes.sql)" --file-format json, then diff two databases.
+*/
+SET NOCOUNT ON;
+SELECT s.name + N'.' + t.name
+       + N' | ' + i.name
+       + N' | ' + i.type_desc
+       + N' | unique=' + CAST(i.is_unique AS NVARCHAR(1))
+       + N' pk=' + CAST(i.is_primary_key AS NVARCHAR(1))
+       + N' uq=' + CAST(i.is_unique_constraint AS NVARCHAR(1))
+       + N' | filter=' + ISNULL(i.filter_definition, N'')
+       + N' | keys=' + ISNULL(STUFF((
+             SELECT N', ' + c.name + CASE WHEN ic.is_descending_key = 1 THEN N' DESC' ELSE N'' END
+             FROM sys.index_columns ic
+                  JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+             WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 0
+             ORDER BY ic.key_ordinal, c.name
+             FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N''), N'')
+       + N' | include=' + ISNULL(STUFF((
+             SELECT N', ' + c.name
+             FROM sys.index_columns ic
+                  JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+             WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 1
+             ORDER BY c.name
+             FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N''), N'')
+       + N' | compression=' + ISNULL((
+             SELECT TOP (1) p.data_compression_desc
+             FROM sys.partitions p
+             WHERE p.object_id = i.object_id AND p.index_id = i.index_id), N'-') AS [index]
+FROM sys.indexes i
+     JOIN sys.tables t ON t.object_id = i.object_id
+     JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE i.type > 0
+      AND t.is_ms_shipped = 0
+ORDER BY [index];

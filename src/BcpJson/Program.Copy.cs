@@ -2,6 +2,7 @@
 using Microsoft.SqlServer.Management.Common;
 using Microsoft.SqlServer.Management.Smo;
 using System.Collections.Generic;
+using Index = Microsoft.SqlServer.Management.Smo.Index;
 using System.Data;
 using System.IO;
 using System.Linq;
@@ -71,16 +72,32 @@ namespace bcpJson
                         throw new InvalidOperationException("Target database not found.");
                     }
 
-                    Table targetTable = PrepareTargetTable(setting, sourceTable, targetDatabase, targetServer);
+                    Table targetTable = PrepareTargetTable(setting, sourceTable, targetDatabase, targetServer, out bool created);
 
                     bool needsBcp = sourceTable.Columns.Cast<Column>().Any(col =>
                         col.DataType.SqlDataType == SqlDataType.Geography ||
                         col.DataType.SqlDataType == SqlDataType.Geometry ||
                         col.DataType.SqlDataType == SqlDataType.HierarchyId);
 
-                    return needsBcp
+                    long copied = needsBcp
                         ? CopyTableViaBcp(setting, tableRef)
                         : CopyTableViaBulkCopy(setting, sourceTable, targetTable, tableRef);
+
+                    // Keys and indexes are built after the load (bulk loading a heap is fastest), and only on tables
+                    // this run created: an existing target keeps its own indexes.
+                    if (created && copied >= 0)
+                    {
+                        if (setting.NoIndexes)
+                        {
+                            PostToConsole(string.Format("{0}: Primary key and indexes not created (--no-indexes).", tableRef.DisplayName));
+                        }
+                        else
+                        {
+                            CreateTargetIndexes(setting, sourceTable, tableRef);
+                        }
+                    }
+
+                    return copied;
                 }
                 finally
                 {
@@ -90,9 +107,13 @@ namespace bcpJson
             }
         }
 
-        /// <summary>Drops/truncates/creates the target table according to the options and returns it.</summary>
-        private static Table PrepareTargetTable(CopyOptions setting, Table sourceTable, Database targetDatabase, Server targetServer)
+        /// <summary>
+        /// Drops/truncates/creates the target table according to the options and returns it.
+        /// <paramref name="created"/> is true when this call created the table (new, or dropped and recreated).
+        /// </summary>
+        private static Table PrepareTargetTable(CopyOptions setting, Table sourceTable, Database targetDatabase, Server targetServer, out bool created)
         {
+            created = false;
             string label = sourceTable.Schema + "." + sourceTable.Name;
             bool targetTableExists = targetDatabase.Tables.Contains(sourceTable.Name, sourceTable.Schema);
 
@@ -153,8 +174,88 @@ namespace bcpJson
                 targetTable.Columns.Add(column);
             }
             targetTable.Create();
+            created = true;
             PostToConsole(string.Format("{0}: Target table created.", label), InfoLevel.Info);
             return targetTable;
+        }
+
+        /// <summary>
+        /// Recreates the source table's primary key, unique constraints and indexes on the newly created target
+        /// table, after the data has been loaded. Each index is scripted by SMO (so filters, included columns,
+        /// sort order, compression, columnstore, XML and spatial indexes carry over) without its ON &lt;filegroup&gt;
+        /// clause, because the target database may not have the same filegroups or partition schemes.
+        /// A failing index is reported as an error and the remaining indexes are still created.
+        /// </summary>
+        private static void CreateTargetIndexes(CopyOptions setting, Table sourceTable, TableRef tableRef)
+        {
+            List<Index> indexes = sourceTable.Indexes.Cast<Index>()
+                .OrderBy(i => IndexCreationRank(i.IndexType, i.IsClustered))
+                .ThenBy(i => i.ID)
+                .ToList();
+            if (indexes.Count == 0)
+            {
+                return;
+            }
+
+            var scripting = new ScriptingOptions
+            {
+                NoFileGroup = true,
+                IncludeIfNotExists = false,
+                ScriptBatchTerminator = false
+            };
+
+            int createdCount = 0;
+            using (var conn = new SqlConnection(setting.TargetConnectionString()))
+            {
+                conn.Open();
+                foreach (Index index in indexes)
+                {
+                    try
+                    {
+                        foreach (string statement in index.Script(scripting).Cast<string>())
+                        {
+                            ExecuteSql(conn, statement);
+                        }
+                        createdCount++;
+                    }
+                    catch (Exception ex)
+                    {
+                        PostToConsole(string.Format("{0}: Could not create index {1}: {2}", tableRef.DisplayName, index.Name, ex.GetBaseException().Message), InfoLevel.Error);
+                    }
+                }
+            }
+
+            PostToConsole(string.Format("{0}: {1} of {2} primary key/unique constraint/index(es) created.", tableRef.DisplayName, createdCount, indexes.Count),
+                createdCount == indexes.Count ? InfoLevel.Info : InfoLevel.Warning);
+        }
+
+        /// <summary>
+        /// Order in which indexes must be created: the clustered index (often the primary key) first, because
+        /// creating it rebuilds the table and XML/spatial indexes require a clustered primary key; then other
+        /// relational and columnstore indexes; then primary XML indexes, which secondary XML indexes depend on.
+        /// </summary>
+        internal static int IndexCreationRank(IndexType type, bool isClustered)
+        {
+            if (isClustered || type == IndexType.ClusteredIndex || type == IndexType.ClusteredColumnStoreIndex)
+            {
+                return 0;
+            }
+
+            switch (type)
+            {
+                case IndexType.NonClusteredIndex:
+                case IndexType.NonClusteredColumnStoreIndex:
+                case IndexType.NonClusteredHashIndex:
+                    return 1;
+                case IndexType.PrimaryXmlIndex:
+                case IndexType.SelectiveXmlIndex:
+                    return 2;
+                case IndexType.SecondaryXmlIndex:
+                case IndexType.SecondarySelectiveXmlIndex:
+                    return 3;
+                default:
+                    return 4; // spatial and anything newer
+            }
         }
 
         private static long CopyTableViaBulkCopy(CopyOptions setting, Table sourceTable, Table targetTable, TableRef tableRef)

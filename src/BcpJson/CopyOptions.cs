@@ -66,6 +66,9 @@ namespace bcpJson
         [Option("no-table-lock", Default = false, Required = false, HelpText = "Load without a table lock (TABLOCK). By default each target table is locked for the load, which is fastest and allows minimal logging; use this when other sessions must keep using the target tables during the copy.")]
         public bool NoTableLock { get; set; }
 
+        [Option("no-indexes", Default = false, Required = false, HelpText = "Do not recreate the source's primary keys, unique constraints and indexes on target tables that copy creates. By default they are built after the data is loaded. Tables that already exist keep their own indexes either way.")]
+        public bool NoIndexes { get; set; }
+
         [Option("snapshot", Default = false, Required = false, HelpText = "Copy from a database snapshot of the source so every table reflects the same point in time. Needs CREATE DATABASE permission and SQL Server 2016 SP1+ (any edition); the snapshot is dropped afterwards.")]
         public bool Snapshot { get; set; }
 

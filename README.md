@@ -156,9 +156,28 @@ bcpjson copy --source-server PROD01 --source-database Sales `
 | `--nolock` | Read the source with `WITH (NOLOCK)`. |
 | `--no-table-lock` | Load without a table lock (default: locked). See [Table locking](#table-locking). |
 | `--snapshot` | Copy from a database snapshot of the source. See [Consistent point-in-time exports](#consistent-point-in-time-exports). |
+| `--no-indexes` | Don't recreate primary keys, unique constraints and indexes on the tables copy creates (default: recreated). See [Keys and indexes](#keys-and-indexes). |
 | `--trust-server-certificate`, `--log-file` | As for export. |
 
-Missing target tables are created from the source definition (columns, nullability, identity, defaults, computed columns — not primary keys or indexes). Tables with geography, geometry or hierarchyid columns are moved with `bcp` through a temporary folder.
+Missing target tables are created from the source definition: columns, nullability, identity, defaults and computed columns, then — after the data is loaded — the primary key, unique constraints and indexes. Tables with geography, geometry or hierarchyid columns are moved with `bcp` through a temporary folder.
+
+#### Keys and indexes
+
+**Default:** on. **Option:** `--no-indexes` turns it off.
+
+When `copy` creates a target table (it did not exist, or `--drop-target` dropped it), it recreates every primary key, unique constraint and index of the source table: clustered and nonclustered, unique and filtered indexes, included columns, descending keys, data compression, columnstore, XML and spatial indexes. They are built **after the data is loaded**, because bulk loading into a table without indexes (with the default table lock) is the fastest way to load, and building each index once at the end is much cheaper than maintaining it row by row. The clustered index is built first, then the others in dependency order.
+
+Indexes are created on the target database's default filegroup: filegroup and partition-scheme placement is not copied, because the target may not have the same filegroups. An index that cannot be created is reported as an error (exit code 1) and the remaining indexes are still created.
+
+A target table that **already exists** keeps its own indexes; `copy` does not add, change or remove them.
+
+Use `--no-indexes` when:
+
+- the target is a staging or scratch database and you will create your own indexes (or none);
+- you want the copy to finish as quickly as possible and do not need to query the result efficiently;
+- the target has little free space: building large indexes needs temporary space in the data files and `tempdb`.
+
+Foreign keys, check constraints and triggers are not copied.
 
 ## Table locking
 
@@ -297,7 +316,7 @@ Each file is a JSON array with one object per row, one row per line:
 - geography/geometry exported to JSON lose their SRID (re-imported as 4326 / 0).
 - `sql_variant` values are re-imported as `nvarchar`.
 - `copy --source-query` is not supported.
-- `copy` creates missing target tables without primary keys or indexes; add them afterwards if needed.
+- `copy` recreates keys and indexes but not foreign keys, check constraints or triggers, and places indexes on the target's default filegroup.
 - `-k` on export is reserved; JSON always writes NULLs.
 
 ## Releasing
