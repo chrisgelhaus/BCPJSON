@@ -41,6 +41,9 @@ namespace bcpJson
         [Option("max-tasks", Default = -1, Required = false, HelpText = "Maximum files imported in parallel (0 or -1 = unlimited).")]
         public int MaxParallelTasks { get; set; }
 
+        [Option("no-table-lock", Default = false, Required = false, HelpText = "Load without a table lock (TABLOCK). By default the target is locked for the load, which is fastest and allows minimal logging; use this when other sessions must keep reading or writing the table during the load, or when several files load into one table with a clustered index.")]
+        public bool NoTableLock { get; set; }
+
         public string GetTargetConnectionString()
         {
             return SqlConnectionFactory.Build(this.TargetSQLServer, this.TargetSQLDatabase, this.TargetSQLLogin, this.TargetSQLPassword, false, this.TrustServerCertificate);

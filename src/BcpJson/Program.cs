@@ -1,4 +1,5 @@
 ﻿using CommandLine;
+using Microsoft.Data.SqlClient;
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -38,19 +39,40 @@ namespace bcpJson
                 return 1;
             }
 
-            Stopwatch sw = Stopwatch.StartNew();
-            long result;
-            switch ((opts.FileFormat ?? string.Empty).ToLowerInvariant())
+            string format = (opts.FileFormat ?? string.Empty).ToLowerInvariant();
+            if (format != "bcp" && format != "json")
             {
-                case "bcp":
+                PostToConsole(string.Format("Unsupported file format '{0}'. Use bcp or json.", opts.FileFormat), InfoLevel.Error);
+                return 1;
+            }
+
+            Stopwatch sw = Stopwatch.StartNew();
+            DatabaseSnapshot snapshot = null;
+            long result;
+            try
+            {
+                if (opts.Snapshot)
+                {
+                    snapshot = CreateSnapshot(opts.srcServer, opts.srcDatabase, opts.srcLogin, opts.srcPassword, opts.TrustServerCertificate);
+                    if (snapshot == null)
+                    {
+                        return 1;
+                    }
+                    opts.srcDatabase = snapshot.Name;
+                }
+
+                if (format == "bcp")
+                {
                     result = opts.IsQueryExport ? ExportQueryToBCP(opts) : ExportToBCP(opts);
-                    break;
-                case "json":
+                }
+                else
+                {
                     result = opts.IsQueryExport ? ExportQueryToJSON(opts) : ExportToJSON(opts);
-                    break;
-                default:
-                    PostToConsole(string.Format("Unsupported file format '{0}'. Use bcp or json.", opts.FileFormat), InfoLevel.Error);
-                    return 1;
+                }
+            }
+            finally
+            {
+                snapshot?.Dispose();
             }
             sw.Stop();
             PostToConsole(string.Format("Total Exported: {0:N0}\tRows in {1}", result, sw.Elapsed), errorCount > 0 ? InfoLevel.Warning : InfoLevel.Success);
@@ -93,7 +115,26 @@ namespace bcpJson
             }
 
             Stopwatch sw = Stopwatch.StartNew();
-            long result = BulkCopyTables(opts);
+            DatabaseSnapshot snapshot = null;
+            long result;
+            try
+            {
+                if (opts.Snapshot)
+                {
+                    snapshot = CreateSnapshot(opts.srcServer, opts.srcDatabase, opts.srcLogin, opts.srcPassword, opts.TrustServerCertificate);
+                    if (snapshot == null)
+                    {
+                        return 1;
+                    }
+                    opts.srcDatabase = snapshot.Name;
+                }
+
+                result = BulkCopyTables(opts);
+            }
+            finally
+            {
+                snapshot?.Dispose();
+            }
             sw.Stop();
             PostToConsole(string.Format("Total Copied: {0:N0}\tRows in {1}", result, sw.Elapsed), errorCount > 0 ? InfoLevel.Warning : InfoLevel.Success);
             return ExitCode();
@@ -106,6 +147,21 @@ namespace bcpJson
         internal static ParallelOptions Parallelism(int maxTasks)
         {
             return new ParallelOptions { MaxDegreeOfParallelism = maxTasks > 0 ? maxTasks : -1 };
+        }
+
+        /// <summary>
+        /// SqlBulkCopy options for loads: identity values and NULLs are always kept; TABLOCK unless --no-table-lock.
+        /// </summary>
+        internal static SqlBulkCopyOptions LoadOptions(bool noTableLock)
+        {
+            var options = SqlBulkCopyOptions.KeepIdentity | SqlBulkCopyOptions.KeepNulls;
+            return noTableLock ? options : options | SqlBulkCopyOptions.TableLock;
+        }
+
+        /// <summary>bcp in load hint matching <see cref="LoadOptions"/>: -h "TABLOCK" unless --no-table-lock.</summary>
+        internal static string BcpLoadHints(bool noTableLock)
+        {
+            return noTableLock ? string.Empty : " -h \"TABLOCK\"";
         }
 
         /// <summary>0 when no errors were reported during the run, otherwise 1.</summary>

@@ -14,13 +14,15 @@ After reading about how Facebook backs up its MySQL fleet at scale — and, just
 
 | Verb | What it does |
 |---|---|
-| `export` | Writes each selected table to its own file, in **JSON** (via SqlClient) or native **BCP** character format (via `bcp.exe`). Can also export the result of a single `--source-query`. |
+| `export` | Writes each selected table to its own file, in **JSON** (via SqlClient) or native **BCP** character format (via the `bcp` utility). Can also export the result of a single `--source-query`. |
 | `import` | Loads JSON or BCP files produced by `export` back into existing tables. |
 | `copy` | Copies tables server-to-server with `SqlBulkCopy`, creating target tables if needed. |
 
-- Tables are processed in parallel.
+- Tables are processed in parallel (`--max-tasks` limits how many at once).
 - Select tables with include/exclude lists for tables and schemas, with `*` wildcards. With no include filters, every user table is selected.
 - JSON exports are ordered by primary key (or by every sortable column if there is no PK), so repeated exports of unchanged data are identical.
+- **Fast loads by default:** imports and copies take a table lock (`TABLOCK`), which allows minimal logging. Opt out with `--no-table-lock` — see [Table locking](#table-locking).
+- **Point-in-time exports:** `--snapshot` reads every table from a database snapshot, so a long export or copy reflects one moment — see [Consistent point-in-time exports](#consistent-point-in-time-exports).
 - Windows Authentication by default; SQL logins supported.
 - Exit code `0` on success, `1` if anything reported an error — suitable for scheduled jobs.
 
@@ -29,7 +31,7 @@ After reading about how Facebook backs up its MySQL fleet at scale — and, just
 - Windows. The BCP paths call `bcp`; they also run on Linux with mssql-tools18, which is how CI tests them.
 - [.NET 8 SDK](https://dotnet.microsoft.com/download) to build, or the .NET 8 runtime to run a framework-dependent build.
 - For `--file-format bcp` and for `copy` of tables with geography/geometry/hierarchyid columns: the SQL Server **bcp utility** on `PATH` (installed with SQL Server or the *Microsoft Command Line Utilities for SQL Server*).
-- SQL Server 2008 or later.
+- SQL Server 2008 or later. `--snapshot` needs SQL Server 2016 SP1 or later (any edition) and is not available on Azure SQL Database.
 
 ## Build
 
@@ -79,6 +81,7 @@ bcpjson export --source-database AdventureWorks --file-format json --export-path
 | `--trust-server-certificate` | Accept the server's TLS certificate without validation (typical for local instances). |
 | `--log-file` | Also append all console messages to this file. |
 | `--max-tasks` | Maximum tables exported in parallel (default unlimited). |
+| `--snapshot` | Export from a database snapshot so every table reflects the same moment (see [Consistent point-in-time exports](#consistent-point-in-time-exports)). |
 
 **Output files**
 
@@ -109,6 +112,7 @@ bcpjson import --file-format bcp --source-path C:\dumps\aw --source-file Sales.C
 | `--target-table` | Load into this table instead of the one named by the file. |
 | `--truncate-target` | Truncate the table before loading. |
 | `--max-tasks` | Maximum files imported in parallel (default unlimited). |
+| `--no-table-lock` | Load without a table lock (default: locked). See [Table locking](#table-locking). |
 | `--trust-server-certificate`, `--log-file` | As for export. |
 
 Identity values and NULLs are preserved. Computed and `rowversion` columns are skipped and recalculated by the server.
@@ -121,7 +125,134 @@ bcpjson copy --source-server PROD01 --source-database Sales `
              --include-schemas dbo --drop-target --max-tasks 4
 ```
 
-Copy accepts the same table/schema filters as export, plus `--drop-target`, `--truncate-target`, `--max-tasks` (default unlimited) and `--nolock`. Missing target tables are created from the source definition (columns, nullability, identity, defaults, computed columns). Tables with geography, geometry or hierarchyid columns are moved with `bcp` through a temporary folder.
+| Option | Description |
+|---|---|
+| `--source-server`, `--source-database`, `--source-login`, `--source-password` | Where to read from (as for export). |
+| `--target-server`, `--target-database`, `--target-login`, `--target-password` | Where to write. The target database must exist. |
+| `--include-tables`, `--exclude-tables`, `--include-schemas`, `--exclude-schemas` | Table selection, as for export. |
+| `--drop-target` | Drop and recreate target tables that already exist. |
+| `--truncate-target` | Empty existing target tables before copying. |
+| `--max-tasks` | Maximum tables copied in parallel (default unlimited). |
+| `--nolock` | Read the source with `WITH (NOLOCK)`. |
+| `--no-table-lock` | Load without a table lock (default: locked). See [Table locking](#table-locking). |
+| `--snapshot` | Copy from a database snapshot of the source. See [Consistent point-in-time exports](#consistent-point-in-time-exports). |
+| `--trust-server-certificate`, `--log-file` | As for export. |
+
+Missing target tables are created from the source definition (columns, nullability, identity, defaults, computed columns — not primary keys or indexes). Tables with geography, geometry or hierarchyid columns are moved with `bcp` through a temporary folder.
+
+## Table locking
+
+**Applies to:** `import` (JSON and BCP) and `copy`. **Default:** on. **Option:** `--no-table-lock` turns it off.
+
+### How table locking works
+
+Every load asks SQL Server for a table lock (`TABLOCK`) on the target table: `SqlBulkCopyOptions.TableLock` for JSON import and copy, `bcp ... -h "TABLOCK"` for BCP import. Taking one table-level lock instead of thousands of row and page locks is the fastest way to bulk load:
+
+- far less lock management and no lock escalation part-way through the load;
+- under the **SIMPLE** or **BULK_LOGGED** recovery model the load can be **minimally logged** (for example into a heap or an empty table), which cuts transaction-log writes dramatically. Under FULL recovery every row is still logged, but the locking savings remain.
+
+The lock is held while each batch is written (10,000 rows for BCP and copy, 50,000 for JSON import), so for practical purposes other sessions cannot use the table until the load finishes. On a heap the lock is a bulk-update (BU) lock; on a table with a clustered index it is an exclusive table lock.
+
+### Table locking examples
+
+```powershell
+# Default: restore a whole export into empty tables as fast as possible (table locks on)
+bcpjson import --file-format json --source-path D:\dumps\sales --source-file "*.json" `
+               --target-database Sales_Restore --truncate-target
+
+# Append a feed into a table that applications are reading and writing right now
+bcpjson import --file-format bcp --source-path D:\feeds --source-file Sales.Orders.bcp `
+               --target-database Sales --no-table-lock
+
+# Several files into one table with a clustered index, loading in parallel
+bcpjson import --file-format json --source-path D:\feeds --source-file "orders_*.json" `
+               --target-database Sales --target-table dbo.Orders --no-table-lock
+
+# Refresh a reporting database that stays online during the copy
+bcpjson copy --source-server PROD01 --source-database Sales `
+             --target-server RPT01 --target-database Sales_Reporting --truncate-target --no-table-lock
+```
+
+### When to keep the default (table lock on)
+
+- Restoring an export into a new or scratch database, or into tables you have just truncated.
+- Nightly or batch loads into staging tables that nothing else reads during the load.
+- Any load where speed and transaction-log volume matter more than concurrent access.
+
+### When to use `--no-table-lock`
+
+- **The target table is live.** Readers block until each batch commits (unless they use snapshot isolation, RCSI or `NOLOCK`), and writers block too. Use row locking when an application must keep working with the table during the load.
+- **Several files load into the same table with a clustered index** (as in the third example). With table locks those loads run one at a time; without them they can run in parallel. Heaps are the exception: BU locks are compatible with each other, so parallel table-locked loads into a heap work well and you can keep the default.
+- **Lock-sensitive environments**, for example a busy server where an exclusive table lock would trip blocking alerts.
+
+Without the table lock the load is fully logged, uses row/page locks (which SQL Server may still escalate to a table lock on very large loads), and is noticeably slower on big tables.
+
+## Consistent point-in-time exports
+
+**Applies to:** `export` (JSON, BCP and `--source-query`) and `copy`. **Default:** off. **Option:** `--snapshot` (requires `--source-database`, the database to snapshot).
+
+### The problem: drift during a long run
+
+Tables are read one after another (or a few at a time with `--max-tasks`). On a busy database a long export is therefore not a single point in time: a table read at minute 40 contains changes that happened after the tables read at minute 1. Typical symptoms when such an export is restored or compared:
+
+- child rows (order lines, payments) whose parent rows are missing, or the reverse;
+- totals that do not reconcile across tables;
+- day-to-day diffs that show changes in one table but not in the related table that changed in the same transaction.
+
+### How `--snapshot` works
+
+With `--snapshot`, bcpJson:
+
+1. creates a [database snapshot](https://learn.microsoft.com/sql/relational-databases/databases/database-snapshots-sql-server) of the source database, named `<database>_bcpjson_<UTC timestamp>`, with its sparse files next to the source data files;
+2. reads every table (and `--source-query`, which runs in the snapshot database) from that snapshot — in parallel, in JSON or BCP, or through `copy`;
+3. drops the snapshot at the end, including when the export fails.
+
+The console reports when the snapshot was created; every file reflects that moment. Creating the snapshot is typically near-instant regardless of database size (its files start empty), and the source stays fully online for reads and writes throughout.
+
+### Snapshot examples
+
+```powershell
+# Nightly point-in-time JSON export of a busy OLTP database
+bcpjson export --source-server PROD01 --source-database Sales --file-format json `
+               --export-path D:\dumps\sales\2026-11-20 --snapshot
+
+# Compare two nightly exports: only the rows that changed show up
+git diff --no-index --stat D:\dumps\sales\2026-11-19 D:\dumps\sales\2026-11-20
+
+# Consistent BCP export of one schema, for a fast reload elsewhere
+bcpjson export --source-server PROD01 --source-database Sales --include-schemas Billing `
+               --file-format bcp --export-path D:\dumps\billing --snapshot
+
+# Refresh a test database with a consistent copy of production
+bcpjson copy --source-server PROD01 --source-database Sales `
+             --target-server TEST01 --target-database Sales_Test --drop-target --snapshot
+```
+
+### When to use `--snapshot`
+
+- **Backups you intend to restore or verify**: the restored database is transactionally consistent.
+- **Day-to-day comparisons** of exports, so a diff shows real changes rather than timing artefacts.
+- **Long exports or copies of a database that is being written to** while they run.
+- **Databases with foreign keys between tables**, where a restore must not contain orphaned rows.
+
+### When not to use `--snapshot`
+
+- **The source is idle** during the export (a maintenance window, a restored copy, a read-only database): there is nothing to drift, so the snapshot adds no value.
+- **No permission**: creating a snapshot needs `CREATE DATABASE` permission on the server (for example the `dbcreator` role). Without it the run stops with an error rather than silently exporting without a snapshot.
+- **Azure SQL Database** (database snapshots are not supported) or **SQL Server older than 2016 SP1** outside Enterprise/Developer edition. Alternative: export from a database copy or a point-in-time restore instead.
+- **Databases with memory-optimized (In-Memory OLTP) filegroups**, which cannot be snapshotted.
+- **A very write-heavy source with little free disk space on the data volume**: while the snapshot exists, the first change to each source page copies the original page into the snapshot's sparse file. The cost grows with the amount of data changed during the run, not with database size.
+
+### Snapshot notes
+
+- `--nolock` is unnecessary with `--snapshot` (a snapshot is read-only, so reads cannot block writers). Without `--snapshot`, `--nolock` is the opposite trade-off: it avoids blocking but can read uncommitted, inconsistent data — not something to rely on for backups.
+- `--snapshot` only affects the source. For `copy`, the target is written normally (and table-locked unless `--no-table-lock`).
+- If a run is killed before it can clean up, a snapshot database is left behind. Find and drop it:
+
+  ```sql
+  SELECT name, create_date FROM sys.databases WHERE source_database_id IS NOT NULL AND name LIKE N'%[_]bcpjson[_]%';
+  DROP DATABASE [Sales_bcpjson_20261120214450];
+  ```
 
 ## JSON format
 
@@ -140,7 +271,7 @@ Each file is a JSON array with one object per row, one row per line:
 
 ## Known limitations
 
-- **Passwords on the command line.** bcp.exe only accepts SQL passwords via `-P`, so they are visible in the process list while bcp runs. Prefer Windows Authentication.
+- **Passwords on the command line.** bcp only accepts SQL passwords via `-P`, so they are visible in the process list while bcp runs. Prefer Windows Authentication.
 - **BCP character format uses `|` as the field terminator**; data containing `|` or line breaks will not round-trip through BCP files. Use JSON for such tables.
 - BCP exports (`bcp out`) are not ordered, so BCP files are not reliably diff-able; JSON files are.
 - geography/geometry exported to JSON lose their SRID (re-imported as 4326 / 0).
@@ -159,6 +290,7 @@ The solution `BcpJson.sln` holds the app in `src/BcpJson/` and the xUnit tests i
 | `Program.Export.cs` | JSON and BCP export, per-table metadata query |
 | `Program.Import.cs` | JSON (SqlBulkCopy) and BCP import |
 | `Program.Copy.cs` | Server-to-server copy (SMO + SqlBulkCopy) |
+| `Program.Snapshot.cs` | Database snapshots for `--snapshot` |
 | `Program.Sql.cs` | Table selection, name quoting, shared SQL helpers |
 | `ExportOptions.cs`, `ImportOptions.cs`, `CopyOptions.cs` | Command-line options for each verb |
 | `SqlConnectionFactory.cs` | Connection string building and connection tests |
