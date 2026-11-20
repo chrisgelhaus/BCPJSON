@@ -1,0 +1,28 @@
+# Weekly version updates. Security updates for vulnerable packages are separate and immediate
+# (Dependabot security updates are enabled in the repository settings).
+# Every update PR runs the full CI suite, including the SQL Server round trips, before it can merge.
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directory: "/"            # BcpJson.sln: src/BcpJson and tests/BcpJson.Tests
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Minor and patch updates arrive as one PR; major versions get their own PR each.
+      nuget-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

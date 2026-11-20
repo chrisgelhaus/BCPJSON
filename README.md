@@ -338,6 +338,10 @@ The solution `BcpJson.sln` holds the app in `src/BcpJson/` and the xUnit tests i
 - [bcp utility](https://learn.microsoft.com/sql/tools/bcp-utility)
 - [SqlBulkCopy](https://learn.microsoft.com/dotnet/api/microsoft.data.sqlclient.sqlbulkcopy)
 
+## Security
+
+Please report vulnerabilities privately, not in public issues. See [SECURITY.md](SECURITY.md) for how, and for security notes on running bcpJson.
+
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2019-2026 Chris Gelhaus.
