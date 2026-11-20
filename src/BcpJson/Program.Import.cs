@@ -34,7 +34,7 @@ namespace bcpJson
             string connectionArgs = BcpConnectionArgs(options.TargetSQLServer, options.TargetSQLDatabase, options.TargetSQLLogin, options.TargetSQLPassword, options.TrustServerCertificate);
             string workingPath = options.SourcePath;
 
-            Parallel.ForEach(FindSourceFiles(options), file =>
+            Parallel.ForEach(FindSourceFiles(options), Parallelism(options.MaxParallelTasks), file =>
             {
                 string baseFileName = Path.GetFileNameWithoutExtension(file.Name);
                 string tableName = string.IsNullOrEmpty(options.TargetTable) ? baseFileName : options.TargetTable;
@@ -99,7 +99,7 @@ namespace bcpJson
         {
             long totalrowCount = 0;
 
-            Parallel.ForEach(FindSourceFiles(options), file =>
+            Parallel.ForEach(FindSourceFiles(options), Parallelism(options.MaxParallelTasks), file =>
             {
                 string tableName = string.IsNullOrEmpty(options.TargetTable) ? Path.GetFileNameWithoutExtension(file.Name) : options.TargetTable;
                 try

@@ -101,7 +101,7 @@ case "${1:-}" in
 
     json)
         create_target_db BcpJsonJson
-        bcpjson import "${TARGET[@]}" --target-database BcpJsonJson --file-format json --source-path "$WORK/source-json" --source-file '*.json'
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonJson --file-format json --max-tasks 2 --source-path "$WORK/source-json" --source-file '*.json'
         export_json BcpJsonJson "$WORK/json-roundtrip"
         compare_exact "$WORK/source-json" "$WORK/json-roundtrip"
         ;;

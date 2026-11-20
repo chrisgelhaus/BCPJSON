@@ -46,5 +46,16 @@ namespace bcpJson.Tests
             Assert.Equal("sales.order]items", table.DisplayName);
             Assert.Equal("[sales].[order]]items]", table.QuotedName);
         }
+
+        [Theory]
+        [InlineData(4, 4)]
+        [InlineData(1, 1)]
+        [InlineData(0, -1)]
+        [InlineData(-1, -1)]
+        [InlineData(-5, -1)]
+        public void Parallelism_treats_zero_and_negative_as_unlimited(int maxTasks, int expected)
+        {
+            Assert.Equal(expected, Program.Parallelism(maxTasks).MaxDegreeOfParallelism);
+        }
     }
 }

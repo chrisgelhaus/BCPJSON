@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace bcpJson
 {
@@ -96,6 +97,15 @@ namespace bcpJson
             sw.Stop();
             PostToConsole(string.Format("Total Copied: {0:N0}\tRows in {1}", result, sw.Elapsed), errorCount > 0 ? InfoLevel.Warning : InfoLevel.Success);
             return ExitCode();
+        }
+
+        /// <summary>
+        /// ParallelOptions for a --max-tasks value. Zero or negative means unlimited (-1); ParallelOptions itself
+        /// rejects 0 and negatives other than -1.
+        /// </summary>
+        internal static ParallelOptions Parallelism(int maxTasks)
+        {
+            return new ParallelOptions { MaxDegreeOfParallelism = maxTasks > 0 ? maxTasks : -1 };
         }
 
         /// <summary>0 when no errors were reported during the run, otherwise 1.</summary>

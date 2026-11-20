@@ -54,7 +54,7 @@ namespace bcpJson
         [Option("truncate-target", Default = false, Required = false, HelpText = "Truncate target table.")]
         public bool TruncateTarget { get; set; }
 
-        [Option("max-tasks", Default = -1, Required = false, HelpText = "Maximum parallel tasks (-1 = unlimited).")]
+        [Option("max-tasks", Default = -1, Required = false, HelpText = "Maximum tables copied in parallel (0 or -1 = unlimited).")]
         public int MaxParallelTasks { get; set; }
 
         [Option("trust-server-certificate", Default = false, Required = false, HelpText = "Trust the servers' TLS certificates without validation (e.g. local instances with self-signed certificates).")]

@@ -78,6 +78,7 @@ bcpjson export --source-database AdventureWorks --file-format json --export-path
 | `--nolock` | Read with `WITH (NOLOCK)` (JSON export). Faster, but can return dirty reads. |
 | `--trust-server-certificate` | Accept the server's TLS certificate without validation (typical for local instances). |
 | `--log-file` | Also append all console messages to this file. |
+| `--max-tasks` | Maximum tables exported in parallel (default unlimited). |
 
 **Output files**
 
@@ -107,6 +108,7 @@ bcpjson import --file-format bcp --source-path C:\dumps\aw --source-file Sales.C
 | `--target-login`, `--target-password` | SQL login. Omit both for Windows Authentication. |
 | `--target-table` | Load into this table instead of the one named by the file. |
 | `--truncate-target` | Truncate the table before loading. |
+| `--max-tasks` | Maximum files imported in parallel (default unlimited). |
 | `--trust-server-certificate`, `--log-file` | As for export. |
 
 Identity values and NULLs are preserved. Computed and `rowversion` columns are skipped and recalculated by the server.
@@ -119,7 +121,7 @@ bcpjson copy --source-server PROD01 --source-database Sales `
              --include-schemas dbo --drop-target --max-tasks 4
 ```
 
-Copy accepts the same table/schema filters as export, plus `--drop-target`, `--truncate-target`, `--max-tasks` (default unlimited) and `--nolock`. Missing target tables are created from the source definition (columns, nullability, identity, defaults, computed columns). Tables with geography, geometry or hierarchyid columns are moved with `bcp.exe` through a temporary folder.
+Copy accepts the same table/schema filters as export, plus `--drop-target`, `--truncate-target`, `--max-tasks` (default unlimited) and `--nolock`. Missing target tables are created from the source definition (columns, nullability, identity, defaults, computed columns). Tables with geography, geometry or hierarchyid columns are moved with `bcp` through a temporary folder.
 
 ## JSON format
 

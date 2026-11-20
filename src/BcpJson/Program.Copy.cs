@@ -27,7 +27,7 @@ namespace bcpJson
             int maxTasks = setting.MaxParallelTasks;
             PostToConsole(maxTasks > 0 ? string.Format("Parallel table task operations: {0}", maxTasks) : "Parallel table task operations: Unlimited", InfoLevel.Info);
 
-            Parallel.ForEach(tables, new ParallelOptions { MaxDegreeOfParallelism = maxTasks }, table =>
+            Parallel.ForEach(tables, Parallelism(maxTasks), table =>
             {
                 try
                 {

@@ -69,7 +69,7 @@ SELECT @Columns, @SortOrder;";
                 return 0;
             }
 
-            Parallel.ForEach(tables, table =>
+            Parallel.ForEach(tables, Parallelism(options.MaxParallelTasks), table =>
             {
                 try
                 {
@@ -213,7 +213,7 @@ SELECT @Columns, @SortOrder;";
             string connectionArgs = BcpConnectionArgs(options.srcServer, options.srcDatabase, options.srcLogin, options.srcPassword, options.TrustServerCertificate);
             string outputPath = options.exportPath;
 
-            Parallel.ForEach(tables, table =>
+            Parallel.ForEach(tables, Parallelism(options.MaxParallelTasks), table =>
             {
                 string name = table.DisplayName;
 

@@ -75,6 +75,15 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Max_tasks_is_available_on_every_verb()
+        {
+            Assert.Equal(-1, Parsed<ExportOptions>("export").MaxParallelTasks);
+            Assert.Equal(3, Parsed<ExportOptions>("export", "--max-tasks", "3").MaxParallelTasks);
+            Assert.Equal(2, Parsed<ImportOptions>("import", "--file-format", "json", "--source-file", "*.json", "--max-tasks", "2").MaxParallelTasks);
+            Assert.Equal(5, Parsed<CopyOptions>("copy", "--max-tasks", "5").MaxParallelTasks);
+        }
+
+        [Fact]
         public void Unknown_verb_fails()
         {
             Assert.IsType<NotParsed<object>>(Parse("backup"));

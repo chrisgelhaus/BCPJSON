@@ -38,6 +38,9 @@ namespace bcpJson
         [Option("log-file", Required = false, HelpText = "Append console messages to this log file.")]
         public string LogFile { get; set; }
 
+        [Option("max-tasks", Default = -1, Required = false, HelpText = "Maximum files imported in parallel (0 or -1 = unlimited).")]
+        public int MaxParallelTasks { get; set; }
+
         public string GetTargetConnectionString()
         {
             return SqlConnectionFactory.Build(this.TargetSQLServer, this.TargetSQLDatabase, this.TargetSQLLogin, this.TargetSQLPassword, false, this.TrustServerCertificate);
