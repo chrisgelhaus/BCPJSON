@@ -98,6 +98,21 @@ namespace bcpJson.Tests
             Assert.False(Parsed<ExportOptions>("export").Snapshot);
         }
 
+        [Theory]
+        [InlineData(0, "--version")]
+        [InlineData(0, "--help")]
+        [InlineData(0, "export", "--help")]
+        [InlineData(0, "import", "--help")]
+        [InlineData(0, "copy", "--help")]
+        [InlineData(1, "backup")]
+        [InlineData(1)]
+        [InlineData(1, "import", "--file-format", "json")]
+        public void Help_and_version_exit_zero_real_errors_exit_one(int expected, params string[] args)
+        {
+            var notParsed = Assert.IsType<NotParsed<object>>(Parse(args));
+            Assert.Equal(expected, Program.ExitCodeForParseErrors(notParsed.Errors));
+        }
+
         [Fact]
         public void Unknown_verb_fails()
         {

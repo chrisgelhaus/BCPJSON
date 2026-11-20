@@ -28,20 +28,40 @@ After reading about how Facebook backs up its MySQL fleet at scale — and, just
 
 ## Requirements
 
-- Windows. The BCP paths call `bcp`; they also run on Linux with mssql-tools18, which is how CI tests them.
-- [.NET 8 SDK](https://dotnet.microsoft.com/download) to build, or the .NET 8 runtime to run a framework-dependent build.
+- Windows (x64 or Arm64) or Linux (x64). Release downloads are self-contained: no .NET install needed. Building from source needs the [.NET 8 SDK](https://dotnet.microsoft.com/download).
 - For `--file-format bcp` and for `copy` of tables with geography/geometry/hierarchyid columns: the SQL Server **bcp utility** on `PATH` (installed with SQL Server or the *Microsoft Command Line Utilities for SQL Server*).
 - SQL Server 2008 or later. `--snapshot` needs SQL Server 2016 SP1 or later (any edition) and is not available on Azure SQL Database.
 
-## Build
+## Install
+
+Download the package for your platform from the [Releases page](https://github.com/chrisgelhaus/BCPJSON/releases):
+
+| Platform | Package |
+|---|---|
+| Windows x64 | `bcpjson-<version>-win-x64.zip` |
+| Windows Arm64 | `bcpjson-<version>-win-arm64.zip` |
+| Linux x64 | `bcpjson-<version>-linux-x64.tar.gz` |
+
+Each package holds a single self-contained executable (`bcpjson.exe` / `bcpjson`) plus `LICENSE`, `NOTICE` and this README. Unpack it anywhere and add the folder to `PATH`.
+
+To check a download, compare it with `SHA256SUMS` from the same release, or verify where and how it was built (requires the [GitHub CLI](https://cli.github.com/)):
+
+```powershell
+Get-FileHash .\bcpjson-2.0.0-win-x64.zip -Algorithm SHA256        # compare with SHA256SUMS
+gh attestation verify .\bcpjson-2.0.0-win-x64.zip --repo chrisgelhaus/BCPJSON
+```
+
+## Build from source
 
 ```powershell
 git clone https://github.com/chrisgelhaus/BCPJSON.git
 cd BCPJSON
 dotnet build -c Release
 dotnet test                                           # unit tests, no database needed
-dotnet publish src/BcpJson -c Release -r win-x64      # single-file bcpjson.exe in src\BcpJson\bin\Release\net8.0\win-x64\publish
+dotnet publish src/BcpJson -c Release -r win-x64 -o publish   # self-contained single-file publish\bcpjson.exe
 ```
+
+Use `-r win-arm64` or `-r linux-x64` for the other platforms.
 
 ## Usage
 
@@ -279,6 +299,20 @@ Each file is a JSON array with one object per row, one row per line:
 - `copy --source-query` is not supported.
 - `copy` creates missing target tables without primary keys or indexes; add them afterwards if needed.
 - `-k` on export is reserved; JSON always writes NULLs.
+
+## Releasing
+
+Releases are built by [`.github/workflows/release.yml`](.github/workflows/release.yml) from a version tag on `master`:
+
+```powershell
+git checkout master; git pull
+git tag v2.1.0            # or v2.1.0-beta.1 for a pre-release
+git push origin v2.1.0
+```
+
+The workflow checks that the tag is on `master`, reruns the full CI suite (unit tests and the SQL Server round trips), publishes and smoke-tests the executable for each platform on that platform, then creates the GitHub Release with generated notes, the packages, `SHA256SUMS` and a signed build-provenance attestation. The version shown by `bcpjson --version` comes from the tag.
+
+To try the workflow without releasing anything, run it manually (*Actions → Release → Run workflow*): everything is built and tested and the packages are attached to the run as artifacts, but no release is created.
 
 ## Project layout
 

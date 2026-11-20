@@ -16,11 +16,12 @@ See `docs/ROADMAP.md` for what has been done, decisions made, and the ordered ne
 dotnet build BcpJson.sln                          # or the VS Code "build" task (.vscode/tasks.json)
 dotnet test BcpJson.sln                           # unit tests (no database needed)
 dotnet run --project src/BcpJson -- export --help # verb help
-dotnet publish src/BcpJson -c Release             # single-file exe (PublishSingleFile=true)
+dotnet publish src/BcpJson -c Release -r win-x64 -o publish  # self-contained single-file exe (needs -r)
 ```
 
 - Target framework: `net8.0`. Assembly name `bcpjson`; debug output `src/BcpJson/bin/Debug/net8.0/bcpjson.dll` (used by `.vscode/launch.json`).
-- **CI:** `.github/workflows/ci.yml` builds with warnings as errors and runs unit tests on Ubuntu and Windows, then an Ubuntu integration job against a SQL Server 2022 service container runs `tests/integration/roundtrip.sh` (`setup`, `json`, `bcp`, `copy`): it builds `BcpJsonSource` from `schema.sql` + `data.sql` and diffs JSON exports after each round trip. Add awkward data there when fixing a data-fidelity bug. The scripts can be run against any SQL Server with `SQL_SERVER`, `SQL_PASSWORD` and `BCPJSON` set.
+- **CI:** `.github/workflows/ci.yml` builds with warnings as errors and runs unit tests on Ubuntu and Windows, then an Ubuntu integration job against a SQL Server 2022 service container runs `tests/integration/roundtrip.sh` (`setup`, `json`, `bcp`, `copy`, `snapshot`) against the published linux-x64 single-file executable: it builds `BcpJsonSource` from `schema.sql` + `data.sql` and diffs JSON exports after each round trip. Add awkward data there when fixing a data-fidelity bug. The scripts can be run against any SQL Server with `SQL_SERVER`, `SQL_PASSWORD` and `BCPJSON` set.
+- **Releases:** `.github/workflows/release.yml` runs on `v*` tags that are on master: it reruns ci.yml (`workflow_call`), publishes and smoke-tests win-x64, win-arm64 (`windows-11-arm` runner) and linux-x64, then creates the GitHub Release with packages, `SHA256SUMS` and a provenance attestation. Manual runs are dry runs (artifacts only). The version comes from the tag via `-p:Version`; the csproj `<Version>` is only the development default.
 - **Runtime prerequisite:** `bcp` (Windows `bcp.exe`, or mssql-tools18 on Linux) must be on `PATH` for the BCP export/import paths and for copying tables with CLR-type columns. Windows Auth is the default when no login/password is given.
 - **Tests:** `tests/BcpJson.Tests` (xUnit) covers the pure helpers; it sees `internal` members via `InternalsVisibleTo`. Make a helper `internal` (not `private`) when it needs a test. The owner has **no local SQL Server**: anything needing a database runs in the GitHub Actions integration job (SQL Server service container).
 

@@ -1,0 +1,191 @@
+name: Release
+
+# Push a tag like v2.1.0 (or v2.1.0-beta.1 for a pre-release) on master to publish a GitHub Release:
+#   git tag v2.1.0 && git push origin v2.1.0
+# Run it manually (Actions > Release > Run workflow) for a dry run: everything is built, tested and uploaded
+# as workflow artifacts, but no tag, release or attestation is created.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  version:
+    name: Determine version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      core: ${{ steps.v.outputs.core }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag must point at a commit on master
+        if: github.ref_type == 'tag'
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/master; then
+            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on master. Tag a commit that was merged through a PR."
+            exit 1
+          fi
+
+      - id: v
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+            publish=true
+          else
+            version="0.0.0-dryrun.${GITHUB_RUN_NUMBER}"
+            publish=false
+          fi
+          if ! [[ "$version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$GITHUB_REF_NAME' is not a version tag like v1.2.3 or v1.2.3-beta.1"
+            exit 1
+          fi
+          core="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          prerelease=false
+          [[ "$version" == *-* ]] && prerelease=true
+          {
+            echo "version=$version"
+            echo "core=$core"
+            echo "prerelease=$prerelease"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version $version (pre-release: $prerelease, publish: $publish)" >> "$GITHUB_STEP_SUMMARY"
+
+  ci:
+    name: CI
+    needs: version
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    name: Publish ${{ matrix.rid }}
+    needs: [version, ci]
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - rid: win-x64
+            os: windows-latest
+            exe: bcpjson.exe
+          - rid: win-arm64
+            os: windows-11-arm
+            exe: bcpjson.exe
+          - rid: linux-x64
+            os: ubuntu-latest
+            exe: bcpjson
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Publish self-contained single-file executable
+        shell: bash
+        run: >
+          dotnet publish src/BcpJson/BcpJson.csproj -c Release -r ${{ matrix.rid }} -o out
+          -p:Version=${{ needs.version.outputs.version }}
+          -p:AssemblyVersion=${{ needs.version.outputs.core }}.0
+          -p:FileVersion=${{ needs.version.outputs.core }}.0
+
+      - name: Smoke test on ${{ matrix.os }}
+        shell: bash
+        run: |
+          ls -l out
+          ./out/${{ matrix.exe }} --version | tee version.txt
+          grep -q "${{ needs.version.outputs.version }}" version.txt
+          ./out/${{ matrix.exe }} export --help > /dev/null
+          ./out/${{ matrix.exe }} import --help > /dev/null
+          ./out/${{ matrix.exe }} copy --help > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.rid }}
+          path: out/${{ matrix.exe }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: ${{ needs.version.outputs.publish == 'true' && 'Create GitHub Release' || 'Package (dry run)' }}
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # create the release
+      id-token: write        # sign the provenance attestation
+      attestations: write    # store the provenance attestation
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: bin
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          for dir in bin/bin-*; do
+            rid="${dir#bin/bin-}"
+            name="bcpjson-${VERSION}-${rid}"
+            mkdir -p "stage/$name"
+            cp "$dir"/* "stage/$name/"
+            cp LICENSE NOTICE README.md "stage/$name/"
+            if [[ "$rid" == win-* ]]; then
+              (cd stage && zip -qr "../dist/$name.zip" "$name")
+            else
+              chmod +x "stage/$name/bcpjson"   # artifact downloads drop the executable bit
+              tar -C stage -czf "dist/$name.tar.gz" "$name"
+            fi
+          done
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -l dist
+          cat dist/SHA256SUMS
+          {
+            echo "### Packages"
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest build provenance
+        if: needs.version.outputs.publish == 'true'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+
+      - name: Create GitHub Release
+        if: needs.version.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          flags=(--verify-tag --generate-notes --title "bcpJson ${VERSION}")
+          [ "$PRERELEASE" = "true" ] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/* "${flags[@]}"
+
+      - name: Upload packages (dry run)
+        if: needs.version.outputs.publish != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-packages-dryrun
+          path: dist
+          retention-days: 7
