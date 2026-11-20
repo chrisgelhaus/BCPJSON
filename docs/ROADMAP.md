@@ -11,7 +11,9 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 - README rewritten; CLAUDE.md added.
 - `dotnet build -c Release` verified on the dev machine (SDK 8.0.134): 0 warnings, 0 errors; `export --help` runs.
 - `.gitattributes` added and line endings renormalized (index LF; `.cs`/`.md`/`.json`/etc. CRLF on checkout, `.yml`/`.gitignore` LF).
-- **Round trip not yet run.** The dev machine has no SQL Server, bcp or Docker, and none will be installed: the CI integration job (step 5) is the first round trip.
+- **Round trips verified in CI** (PR #13, run 44819751435): JSON (7/7 files identical, 120,019 rows), BCP (3/3 `plain` files identical) and copy (7/7 identical ignoring row order) against SQL Server 2022 on Linux.
+- Fixes found by CI: Linux bcp has no `-x` (exports now write non-XML `-c.fmt`; import still accepts old `-c.xml`) and no `-o` (bcp stdout is captured in-process into the same `_output.log`).
+- Merged master (PRs #6–#12, Codex): already covered by the refactor except `--max-tasks` for export/import, which was ported via `Parallelism()`.
 
 ## Decisions
 
@@ -25,8 +27,9 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 2. ~~Repo hygiene~~ — done: `.gitattributes`, Apache-2.0 `LICENSE` + `NOTICE`.
 3. ~~Restructure for tests~~ — done: app in `src/BcpJson/` (exe still `bcpjson`), `tests/BcpJson.Tests` (xUnit 2.9), `BcpJson.sln`, `InternalsVisibleTo`.
 4. ~~Unit tests (no DB)~~ — done: 68 tests for `BuildSourceObjectIDList`, `QuoteName`/`SqlLiteral`/`LikeLiteral`/`TableRef`, `ReadJsonValue` (every CLR type, NULLs, precision, offsets, invariant culture), `SqlConnectionFactory.Build`, CLI parsing for all verbs.
-5. ~~CI workflow~~ — written: `.github/workflows/ci.yml` replaces the .NET 6 `dotnet.yml`. Build + unit tests on ubuntu and windows; integration job (SQL Server 2022 container, mssql-tools18) runs `tests/integration/roundtrip.sh` for JSON, BCP and copy round trips. Code now calls `bcp` instead of `bcp.exe`. **Check the first run on the PR and fix what it finds.**
+5. ~~CI workflow~~ — done and green: `.github/workflows/ci.yml` (build + 77 unit tests on ubuntu and windows; integration job with SQL Server 2022 container + mssql-tools18 running `tests/integration/roundtrip.sh`). Code calls `bcp` instead of `bcp.exe`.
+   - Follow-ups: bump actions off Node 20 (`checkout`/`setup-dotnet`/`upload-artifact` v4 warn); `decimal` values beyond 28-29 significant digits are untested (likely overflow in SqlClient); copy does not create primary keys/indexes on the target.
 6. **Branch protection** on `master`: require CI to pass.
-7. **Release workflow** (`.github/workflows/release.yml`) on `v*` tags: tag-driven version (MinVer or `-p:Version`), `dotnet publish` single-file for win-x64, win-arm64 (+ linux-x64 once bcp is cross-platform), zip + SHA-256 checksums, `actions/attest-build-provenance`, GitHub Release with generated notes.
+7. **Release workflow** (`.github/workflows/release.yml`) on `v*` tags: tag-driven version (MinVer or `-p:Version`), `dotnet publish` single-file for win-x64, win-arm64 (+ linux-x64: bcp paths now verified on Linux), zip + SHA-256 checksums, `actions/attest-build-provenance`, GitHub Release with generated notes.
 8. **Security/maintenance:** Dependabot for `nuget` and `github-actions`, CodeQL for C#, secret scanning + push protection. Then upgrade Microsoft.Data.SqlClient and SMO under test.
 9. **Later:** winget manifest, `dotnet tool` package on NuGet.org, GHCR container image, Windows code signing (Azure Trusted Signing).

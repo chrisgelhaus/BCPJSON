@@ -65,6 +65,8 @@ All verbs share `--trust-server-certificate` and `--log-file`. `Main` returns ex
 - BCP char format with `|` delimiter can't round-trip data containing `|` or newlines; `bcp out` output is unordered.
 - JSON loses geography/geometry SRID; `sql_variant` re-imports as nvarchar.
 - `copy --source-query` and export `-k` are accepted but not implemented.
+- `copy` creates target tables without primary keys or indexes.
+- Linux bcp lacks `-x` and `-o`; don't reintroduce them (use non-XML format files and `ExecuteProcess(..., outputLogFile)`).
 
 ## Conventions
 

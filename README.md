@@ -146,6 +146,7 @@ Each file is a JSON array with one object per row, one row per line:
 - geography/geometry exported to JSON lose their SRID (re-imported as 4326 / 0).
 - `sql_variant` values are re-imported as `nvarchar`.
 - `copy --source-query` is not supported.
+- `copy` creates missing target tables without primary keys or indexes; add them afterwards if needed.
 - `-k` on export is reserved; JSON always writes NULLs.
 
 ## Project layout
