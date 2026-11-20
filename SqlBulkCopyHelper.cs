@@ -4,26 +4,40 @@ using System.Reflection;
 namespace bcpJson
 {
     /// <summary>
-    /// Helper class to process the SqlBulkCopy class
-    /// https://stackoverflow.com/questions/1188384/sqlbulkcopy-row-count-when-complete
+    /// Reads the number of rows copied by a SqlBulkCopy instance.
+    /// SqlClient has exposed this under different names across versions (public RowsCopied / RowsCopied64,
+    /// or a private field), so it is resolved once by reflection. Returns -1 if no member is found.
     /// </summary>
     static class SqlBulkCopyHelper
     {
-        static FieldInfo rowsCopiedField = null;
+        private static readonly Func<SqlBulkCopy, long> rowsCopiedReader = CreateReader();
 
-        /// <summary>
-        /// Gets the rows copied from the specified SqlBulkCopy object
-        /// </summary>
-        /// <param name="bulkCopy">The bulk copy.</param>
-        /// <returns></returns>
-        public static int GetRowsCopied(SqlBulkCopy bulkCopy)
+        private static Func<SqlBulkCopy, long> CreateReader()
         {
-            if (rowsCopiedField == null)
+            Type type = typeof(SqlBulkCopy);
+
+            PropertyInfo property = type.GetProperty("RowsCopied64", BindingFlags.Public | BindingFlags.Instance)
+                ?? type.GetProperty("RowsCopied", BindingFlags.Public | BindingFlags.Instance);
+            if (property != null)
             {
-                rowsCopiedField = typeof(SqlBulkCopy).GetField("_rowsCopied", BindingFlags.NonPublic | BindingFlags.GetField | BindingFlags.Instance);
+                return bulkCopy => Convert.ToInt64(property.GetValue(bulkCopy));
             }
 
-            return (int)rowsCopiedField.GetValue(bulkCopy);
+            foreach (string fieldName in new[] { "_rowsCopied", "rowsCopied", "_rowsCopied64" })
+            {
+                FieldInfo field = type.GetField(fieldName, BindingFlags.NonPublic | BindingFlags.Instance);
+                if (field != null)
+                {
+                    return bulkCopy => Convert.ToInt64(field.GetValue(bulkCopy));
+                }
+            }
+
+            return bulkCopy => -1;
+        }
+
+        public static long GetRowsCopied(SqlBulkCopy bulkCopy)
+        {
+            return rowsCopiedReader(bulkCopy);
         }
     }
 }

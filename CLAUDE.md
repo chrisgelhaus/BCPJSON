@@ -1,0 +1,74 @@
+# CLAUDE.md
+
+This file gives Claude Code guidance for working in this repository.
+
+## What this is
+
+**bcpJson** is a .NET 8 console tool for moving SQL Server data fast. It was inspired by Facebook's approach to backing up (and test-restoring) MySQL at scale: unload every table into a structured, diff-able file format so backups can be verified and compared. Author: Chris Gelhaus. Remote: `https://github.com/chrisgelhaus/BCPJSON` (default branch `master`).
+
+## Current status
+
+See `docs/ROADMAP.md` for what has been done, decisions made, and the ordered next steps. Update it when a step is completed.
+
+## Build and run
+
+```powershell
+dotnet restore
+dotnet build                      # or the VS Code "build" task (.vscode/tasks.json)
+dotnet run -- export --help       # verb help
+dotnet publish -c Release         # single-file exe (PublishSingleFile=true)
+```
+
+- Target framework: `net8.0`. Assembly name `bcpjson`; debug output `bin/Debug/net8.0/bcpjson.dll` (used by `.vscode/launch.json`).
+- **Runtime prerequisite (Windows):** `bcp.exe` must be on `PATH` for the BCP export/import paths and for copying tables with CLR-type columns. Windows Auth is the default when no login/password is given.
+- There are **no tests** yet. Any real verification needs a reachable SQL Server instance (e.g. a local Developer edition or a `mcr.microsoft.com/mssql/server` container).
+
+## CLI verbs (CommandLineParser 2.9)
+
+| Verb | Options class | Entry | Notes |
+|---|---|---|---|
+| `export` | `ExportOptions.cs` | `ExportData` → `ExportToBCP` / `ExportToJSON` / `ExportQueryTo*` | `--file-format bcp\|json`, table/schema include/exclude filters (`*` wildcards; no include filter = all user tables), `--source-query` + `--output-name`, `--nolock` |
+| `import` | `ImportOptions.cs` | `ImportData` → `ImportFromBCP` / `ImportFromJSON` | Target table must exist. JSON import streams with `JsonTextReader` + `SqlBulkCopy`; CLR-type columns go through a `#bcpjson_stage` temp table and `::Parse()`. BCP import uses the `<schema>.<table>-c.xml` format file with `-E -k`. |
+| `copy` | `CopyOptions.cs` | `CopyData` → `BulkCopyTables` → `CopyTable` | SMO creates/drops/truncates the target, `SqlBulkCopy` moves data; tables with geography/geometry/hierarchyid fall back to bcp export+import via a temp folder. |
+
+All verbs share `--trust-server-certificate` and `--log-file`. `Main` returns exit code 1 if any `InfoLevel.Error` message was posted.
+
+## Code layout
+
+Namespace `bcpJson`, flat in the repo root. `Program` is a partial class split by verb:
+
+- `Program.cs` — `Main`, verb dispatch, `ExecuteProcess` (bcp.exe), thread-safe `PostToConsole` (+ log file, error counting).
+- `Program.Export.cs` — JSON/BCP export, `TableMetadataSql` (column list + deterministic sort order), `WriteJsonRows`, bcp argument/row-count helpers.
+- `Program.Import.cs` — BCP and JSON import, `ReadJsonValue` type conversion.
+- `Program.Copy.cs` — server-to-server copy.
+- `Program.Sql.cs` — `TableRef`, `BuildSourceObjectIDList` (filters → T-SQL), `GetSourceTables`, `GetTableObject`, `QuoteName`/`SqlLiteral`/`LikeLiteral`.
+- `SqlConnectionFactory.cs` — connection strings via `SqlConnectionStringBuilder`; `TryOpen` for validation.
+- `SqlBulkCopyHelper.cs` — rows-copied via reflection (member name differs across SqlClient versions).
+- `CustomSelect.sql` — reference copy of `TableMetadataSql`; not loaded at runtime, keep in sync.
+
+### Export format
+- JSON: `<schema>.<table>.json`, a JSON array, one row object per line (line-diffable). Ordered by PK, else by all sortable columns. CLR types (system_type_id 240) are written with `.ToString()`.
+- BCP: `bcp format` → `<schema>.<table>-c.xml`, `bcp out` → `<schema>.<table>.bcp` (char mode, `|` delimiter) plus `_error.log` / `_output.log`; row counts are parsed from the output log.
+
+## Rules for changes
+
+- Quote identifiers with `QuoteName()` and literals with `SqlLiteral()`; parameterize values where possible. Never concatenate raw user input into SQL.
+- Shared counters inside `Parallel.ForEach` must use `Interlocked`.
+- Report problems with `PostToConsole(..., InfoLevel.Error)` so the exit code reflects them; catch per table/file so one failure doesn't stop the run.
+- Set `CommandTimeout = 0` / `BulkCopyTimeout = 0` for data-moving commands.
+- No compiler was available when the 2026-11 refactor was written: run `dotnet build` and a round-trip test (export → import → compare) before trusting changes.
+
+## Remaining known issues
+
+- No test project; `.github/workflows/dotnet.yml` still targets .NET 6.0.x and runs `dotnet test` with nothing to test (see README / CI plan).
+- bcp.exe requires SQL passwords on the command line (`-P`).
+- BCP char format with `|` delimiter can't round-trip data containing `|` or newlines; `bcp out` output is unordered.
+- JSON loses geography/geometry SRID; `sql_variant` re-imports as nvarchar.
+- `copy --source-query` and export `-k` are accepted but not implemented.
+
+## Conventions
+
+- C# files are UTF-8 with BOM and **CRLF** line endings; keep them that way.
+- `Nullable` is disabled and `ImplicitUsings` is enabled.
+- Console output goes through `PostToConsole(message, InfoLevel)` — reuse it rather than `Console.WriteLine`.
+- Never commit connection strings or credentials; test against a local instance.
