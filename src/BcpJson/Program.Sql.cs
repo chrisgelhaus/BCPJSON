@@ -61,7 +61,7 @@ namespace bcpJson
         /// include/exclude filters. With no include filters, every user table is selected before exclusions apply.
         /// Literal names match "schema.table" exactly; entries containing * are treated as LIKE patterns.
         /// </summary>
-        private static string BuildSourceObjectIDList(IEnumerable<string> includeTables, IEnumerable<string> excludeTables, IEnumerable<string> includeSchemas, IEnumerable<string> excludeSchemas)
+        internal static string BuildSourceObjectIDList(IEnumerable<string> includeTables, IEnumerable<string> excludeTables, IEnumerable<string> includeSchemas, IEnumerable<string> excludeSchemas)
         {
             includeTables = (includeTables ?? Enumerable.Empty<string>()).Select(s => s.Trim()).Where(s => s.Length > 0).ToList();
             excludeTables = (excludeTables ?? Enumerable.Empty<string>()).Select(s => s.Trim()).Where(s => s.Length > 0).ToList();

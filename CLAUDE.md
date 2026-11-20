@@ -13,15 +13,15 @@ See `docs/ROADMAP.md` for what has been done, decisions made, and the ordered ne
 ## Build and run
 
 ```powershell
-dotnet restore
-dotnet build                      # or the VS Code "build" task (.vscode/tasks.json)
-dotnet run -- export --help       # verb help
-dotnet publish -c Release         # single-file exe (PublishSingleFile=true)
+dotnet build BcpJson.sln                          # or the VS Code "build" task (.vscode/tasks.json)
+dotnet test BcpJson.sln                           # unit tests (no database needed)
+dotnet run --project src/BcpJson -- export --help # verb help
+dotnet publish src/BcpJson -c Release             # single-file exe (PublishSingleFile=true)
 ```
 
-- Target framework: `net8.0`. Assembly name `bcpjson`; debug output `bin/Debug/net8.0/bcpjson.dll` (used by `.vscode/launch.json`).
+- Target framework: `net8.0`. Assembly name `bcpjson`; debug output `src/BcpJson/bin/Debug/net8.0/bcpjson.dll` (used by `.vscode/launch.json`).
 - **Runtime prerequisite (Windows):** `bcp.exe` must be on `PATH` for the BCP export/import paths and for copying tables with CLR-type columns. Windows Auth is the default when no login/password is given.
-- There are **no tests** yet. Any real verification needs a reachable SQL Server instance (e.g. a local Developer edition or a `mcr.microsoft.com/mssql/server` container).
+- **Tests:** `tests/BcpJson.Tests` (xUnit) covers the pure helpers; it sees `internal` members via `InternalsVisibleTo`. Make a helper `internal` (not `private`) when it needs a test. The owner has **no local SQL Server**: anything needing a database runs in the GitHub Actions integration job (SQL Server service container).
 
 ## CLI verbs (CommandLineParser 2.9)
 
@@ -35,7 +35,7 @@ All verbs share `--trust-server-certificate` and `--log-file`. `Main` returns ex
 
 ## Code layout
 
-Namespace `bcpJson`, flat in the repo root. `Program` is a partial class split by verb:
+`BcpJson.sln` at the root; the app is `src/BcpJson/` (namespace `bcpJson`, all files flat in that folder) and the tests are `tests/BcpJson.Tests/`. `Program` is a partial class split by verb:
 
 - `Program.cs` — `Main`, verb dispatch, `ExecuteProcess` (bcp.exe), thread-safe `PostToConsole` (+ log file, error counting).
 - `Program.Export.cs` — JSON/BCP export, `TableMetadataSql` (column list + deterministic sort order), `WriteJsonRows`, bcp argument/row-count helpers.
@@ -56,11 +56,11 @@ Namespace `bcpJson`, flat in the repo root. `Program` is a partial class split b
 - Shared counters inside `Parallel.ForEach` must use `Interlocked`.
 - Report problems with `PostToConsole(..., InfoLevel.Error)` so the exit code reflects them; catch per table/file so one failure doesn't stop the run.
 - Set `CommandTimeout = 0` / `BulkCopyTimeout = 0` for data-moving commands.
-- No compiler was available when the 2026-11 refactor was written: run `dotnet build` and a round-trip test (export → import → compare) before trusting changes.
+- Run `dotnet test BcpJson.sln` before committing; add unit tests for new pure logic. Behaviour that touches SQL Server is only proven by the CI round-trip (export → import → compare) job.
 
 ## Remaining known issues
 
-- No test project; `.github/workflows/dotnet.yml` still targets .NET 6.0.x and runs `dotnet test` with nothing to test (see README / CI plan).
+- `.github/workflows/dotnet.yml` still targets .NET 6.0.x (fails on the net8.0 projects); to be replaced by `ci.yml` (ROADMAP step 5). No database integration tests yet.
 - bcp.exe requires SQL passwords on the command line (`-P`).
 - BCP char format with `|` delimiter can't round-trip data containing `|` or newlines; `bcp out` output is unordered.
 - JSON loses geography/geometry SRID; `sql_variant` re-imports as nvarchar.

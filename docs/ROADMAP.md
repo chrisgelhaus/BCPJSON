@@ -23,8 +23,8 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 
 1. ~~Smoke test locally~~ — dropped (no local SQL Server); covered by the CI integration job in step 5.
 2. ~~Repo hygiene~~ — done: `.gitattributes`, Apache-2.0 `LICENSE` + `NOTICE`.
-3. **Restructure for tests:** move the app to `src/BcpJson/`, add `tests/BcpJson.Tests` (xUnit) and a `.sln`; `InternalsVisibleTo` for helpers.
-4. **Unit tests (no DB):** `BuildSourceObjectIDList` (literals, wildcards, escaping, "no include = all"), `QuoteName`/`SqlLiteral`/`LikeLiteral`, `ReadJsonValue` for every SQL type, `SqlConnectionFactory.Build`, CLI parsing.
+3. ~~Restructure for tests~~ — done: app in `src/BcpJson/` (exe still `bcpjson`), `tests/BcpJson.Tests` (xUnit 2.9), `BcpJson.sln`, `InternalsVisibleTo`.
+4. ~~Unit tests (no DB)~~ — done: 68 tests for `BuildSourceObjectIDList`, `QuoteName`/`SqlLiteral`/`LikeLiteral`/`TableRef`, `ReadJsonValue` (every CLR type, NULLs, precision, offsets, invariant culture), `SqlConnectionFactory.Build`, CLI parsing for all verbs.
 5. **CI workflow** (`.github/workflows/ci.yml`): .NET 8, `actions/checkout@v4`, `actions/setup-dotnet@v4`, build Release with warnings as errors, unit tests; integration job with SQL Server 2022 service container + mssql-tools18 that creates a sample DB with awkward types, runs export(json) → import → export, and diffs the two exports. Change `bcp.exe` → `bcp` so bcp paths run on Linux too.
 6. **Branch protection** on `master`: require CI to pass.
 7. **Release workflow** (`.github/workflows/release.yml`) on `v*` tags: tag-driven version (MinVer or `-p:Version`), `dotnet publish` single-file for win-x64, win-arm64 (+ linux-x64 once bcp is cross-platform), zip + SHA-256 checksums, `actions/attest-build-provenance`, GitHub Release with generated notes.

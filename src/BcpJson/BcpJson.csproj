@@ -3,6 +3,8 @@
   <PropertyGroup>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
     <OutputType>Exe</OutputType>
+    <AssemblyName>bcpjson</AssemblyName>
+    <RootNamespace>bcpJson</RootNamespace>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
@@ -20,6 +22,10 @@
     <PackageReference Include="Microsoft.SqlServer.SqlManagementObjects" Version="170.18.0" />
     <PackageReference Include="Microsoft.SqlServer.Types" Version="160.1000.6" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="BcpJson.Tests" />
   </ItemGroup>
 
 </Project>

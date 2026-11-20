@@ -37,7 +37,8 @@ After reading about how Facebook backs up its MySQL fleet at scale — and, just
 git clone https://github.com/chrisgelhaus/BCPJSON.git
 cd BCPJSON
 dotnet build -c Release
-dotnet publish -c Release -r win-x64      # single-file bcpjson.exe in bin\Release\net8.0\win-x64\publish
+dotnet test                                           # unit tests, no database needed
+dotnet publish src/BcpJson -c Release -r win-x64      # single-file bcpjson.exe in src\BcpJson\bin\Release\net8.0\win-x64\publish
 ```
 
 ## Usage
@@ -146,6 +147,8 @@ Each file is a JSON array with one object per row, one row per line:
 - `-k` on export is reserved; JSON always writes NULLs.
 
 ## Project layout
+
+The solution `BcpJson.sln` holds the app in `src/BcpJson/` and the xUnit tests in `tests/BcpJson.Tests/`. Files in `src/BcpJson/`:
 
 | File | Contents |
 |---|---|

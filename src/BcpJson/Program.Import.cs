@@ -292,7 +292,7 @@ ORDER BY c.column_id;";
         }
 
         /// <summary>Reads the next JSON value (the reader is on a property name) and converts it to the column type.</summary>
-        private static object ReadJsonValue(JsonTextReader json, Type type)
+        internal static object ReadJsonValue(JsonTextReader json, Type type)
         {
             if (type == typeof(decimal))
             {
