@@ -1,0 +1,30 @@
+# Normalize line endings: LF in the repository, platform-appropriate on checkout
+# unless pinned below.
+* text=auto
+
+# Source and project files are CRLF in the working tree (project convention).
+*.cs      text eol=crlf
+*.csproj  text eol=crlf
+*.sln     text eol=crlf
+*.props   text eol=crlf
+*.targets text eol=crlf
+*.sql     text eol=crlf
+*.md      text eol=crlf
+*.json    text eol=crlf
+*.ps1     text eol=crlf
+*.cmd     text eol=crlf
+*.bat     text eol=crlf
+
+# Files consumed by Unix tooling stay LF.
+*.sh      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+.gitignore     text eol=lf
+.gitattributes text eol=lf
+
+# Binary
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.zip  binary
+*.bcp  binary
