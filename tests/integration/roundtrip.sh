@@ -28,7 +28,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 export SQLCMDPASSWORD="$SQL_PASSWORD"
 
 sql() {
-    sqlcmd -S "$SQL_SERVER" -U "$SQL_USER" -C -b -f 65001 "$@"
+    # -I: QUOTED_IDENTIFIER ON (sqlcmd defaults to OFF), required for filtered/XML/spatial indexes.
+    sqlcmd -S "$SQL_SERVER" -U "$SQL_USER" -C -b -I -f 65001 "$@"
 }
 
 SOURCE=(--source-server "$SQL_SERVER" --source-login "$SQL_USER" --source-password "$SQL_PASSWORD")
