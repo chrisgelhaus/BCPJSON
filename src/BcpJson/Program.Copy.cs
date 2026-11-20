@@ -175,7 +175,7 @@ namespace bcpJson
                 {
                     cmd.CommandTimeout = 0;
                     using (var reader = cmd.ExecuteReader(CommandBehavior.SingleResult))
-                    using (var bulkCopy = new SqlBulkCopy(setting.TargetConnectionString(), SqlBulkCopyOptions.KeepIdentity | SqlBulkCopyOptions.KeepNulls))
+                    using (var bulkCopy = new SqlBulkCopy(setting.TargetConnectionString(), LoadOptions(setting.NoTableLock)))
                     {
                         bulkCopy.DestinationTableName = QuoteName(targetTable.Schema) + "." + QuoteName(targetTable.Name);
                         bulkCopy.BatchSize = 10000;
@@ -238,7 +238,8 @@ namespace bcpJson
                     TargetSQLPassword = setting.TargetSQLPassword,
                     TrustServerCertificate = setting.TrustServerCertificate,
                     TargetTable = tableRef.DisplayName,
-                    TruncateTarget = false
+                    TruncateTarget = false,
+                    NoTableLock = setting.NoTableLock
                 };
                 return ImportFromBCP(importOptions);
             }

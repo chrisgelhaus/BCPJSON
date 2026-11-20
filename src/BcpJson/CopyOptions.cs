@@ -63,6 +63,12 @@ namespace bcpJson
         [Option("log-file", Required = false, HelpText = "Append console messages to this log file.")]
         public string outputLogFile { get; set; }
 
+        [Option("no-table-lock", Default = false, Required = false, HelpText = "Load without a table lock (TABLOCK). By default each target table is locked for the load, which is fastest and allows minimal logging; use this when other sessions must keep using the target tables during the copy.")]
+        public bool NoTableLock { get; set; }
+
+        [Option("snapshot", Default = false, Required = false, HelpText = "Copy from a database snapshot of the source so every table reflects the same point in time. Needs CREATE DATABASE permission and SQL Server 2016 SP1+ (any edition); the snapshot is dropped afterwards.")]
+        public bool Snapshot { get; set; }
+
         public string SourceConnectionString()
         {
             return SqlConnectionFactory.Build(this.srcServer, this.srcDatabase, this.srcLogin, this.srcPassword, true, this.TrustServerCertificate);

@@ -4,7 +4,10 @@
 #   roundtrip.sh setup   create BcpJsonSource (schema + data) and the empty target databases
 #   roundtrip.sh json    export JSON -> import JSON -> export JSON, diff with the source export
 #   roundtrip.sh bcp     export BCP  -> import BCP  -> export JSON, diff with the source export (schema "plain")
-#   roundtrip.sh copy    copy (SMO + SqlBulkCopy) -> export JSON, diff with the source export (row order ignored)
+#   roundtrip.sh copy    copy --snapshot (SMO + SqlBulkCopy) -> export JSON, diff with the source export (row order ignored)
+#   roundtrip.sh snapshot  export --snapshot (JSON and BCP), diff with the source export; no snapshot may be left behind
+#
+# Table locking: JSON import and copy use the default (TABLOCK); BCP import uses --no-table-lock.
 #
 # Environment:
 #   SQL_SERVER    (default localhost)
@@ -80,6 +83,18 @@ normalize_rows() {
     sed -e 's/^\[//' -e 's/^,//' -e 's/\]$//' "$1" | LC_ALL=C sort
 }
 
+# Fails if a database snapshot was left behind (--snapshot must always drop it).
+assert_no_snapshots() {
+    local left
+    left="$(sql -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.databases WHERE source_database_id IS NOT NULL;" | tr -d '[:space:]')"
+    if [ "$left" != "0" ]; then
+        echo "::error::$left database snapshot(s) left behind"
+        sql -Q "SELECT name, create_date FROM sys.databases WHERE source_database_id IS NOT NULL;"
+        return 1
+    fi
+    echo "No database snapshots left behind."
+}
+
 create_target_db() {
     local db="$1"
     sql -Q "IF DB_ID(N'$db') IS NOT NULL BEGIN ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db]; END"
@@ -111,7 +126,8 @@ case "${1:-}" in
         rm -rf "$WORK/source-bcp"
         bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format bcp --include-schemas plain --export-path "$WORK/source-bcp"
         ls -l "$WORK/source-bcp"
-        bcpjson import "${TARGET[@]}" --target-database BcpJsonBcp --file-format bcp --source-path "$WORK/source-bcp" --source-file '*.bcp'
+        # Table locking is the default; this path covers --no-table-lock (JSON import and copy cover TABLOCK).
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonBcp --file-format bcp --no-table-lock --source-path "$WORK/source-bcp" --source-file '*.bcp'
         export_json BcpJsonBcp "$WORK/bcp-roundtrip" --include-schemas plain
         mkdir -p "$WORK/source-json-plain"
         rm -f "$WORK/source-json-plain"/*
@@ -122,14 +138,28 @@ case "${1:-}" in
     copy)
         sql -Q "IF DB_ID(N'BcpJsonCopy') IS NOT NULL BEGIN ALTER DATABASE [BcpJsonCopy] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [BcpJsonCopy]; END; CREATE DATABASE [BcpJsonCopy];"
         sql -d BcpJsonCopy -Q "EXEC (N'CREATE SCHEMA rt'); EXEC (N'CREATE SCHEMA plain');"
-        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonCopy
+        # Copies from a point-in-time snapshot, with the default table lock (including the bcp fallback for CLR types).
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonCopy --snapshot
+        assert_no_snapshots
         export_json BcpJsonCopy "$WORK/copy-roundtrip"
         # copy creates the tables without primary keys, so the export order can differ; compare rows as sets.
         compare_unordered "$WORK/source-json" "$WORK/copy-roundtrip"
         ;;
 
+    snapshot)
+        # Export from a database snapshot (JSON and BCP); output must match the live export and the snapshot must be gone.
+        export_json BcpJsonSource "$WORK/snapshot-json" --snapshot
+        assert_no_snapshots
+        compare_exact "$WORK/source-json" "$WORK/snapshot-json"
+        rm -rf "$WORK/snapshot-bcp"
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format bcp --include-schemas plain --export-path "$WORK/snapshot-bcp" --snapshot
+        assert_no_snapshots
+        ls -l "$WORK/snapshot-bcp"
+        [ -s "$WORK/snapshot-bcp/plain.Numbers.bcp" ] || { echo "::error::Snapshot BCP export wrote no data"; exit 1; }
+        ;;
+
     *)
-        echo "usage: $0 setup|json|bcp|copy" >&2
+        echo "usage: $0 setup|json|bcp|copy|snapshot" >&2
         exit 2
         ;;
 esac

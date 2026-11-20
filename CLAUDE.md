@@ -32,7 +32,7 @@ dotnet publish src/BcpJson -c Release             # single-file exe (PublishSing
 | `import` | `ImportOptions.cs` | `ImportData` → `ImportFromBCP` / `ImportFromJSON` | Target table must exist. JSON import streams with `JsonTextReader` + `SqlBulkCopy`; CLR-type columns go through a `#bcpjson_stage` temp table and `::Parse()`. BCP import uses the `<schema>.<table>-c.fmt` format file (falls back to legacy `-c.xml`) with `-E -k`. |
 | `copy` | `CopyOptions.cs` | `CopyData` → `BulkCopyTables` → `CopyTable` | SMO creates/drops/truncates the target, `SqlBulkCopy` moves data; tables with geography/geometry/hierarchyid fall back to bcp export+import via a temp folder. |
 
-All verbs share `--trust-server-certificate` and `--log-file`. `Main` returns exit code 1 if any `InfoLevel.Error` message was posted.
+All verbs share `--trust-server-certificate`, `--log-file` and `--max-tasks` (via `Parallelism()`). Loads (JSON/BCP import, copy) use TABLOCK by default through `LoadOptions()` / `BcpLoadHints()`; `--no-table-lock` turns it off. `export` and `copy` take `--snapshot`: `CreateSnapshot()` makes a database snapshot, `srcDatabase` is swapped to it (so connection strings, bcp args and SMO all follow), and it is dropped in a `finally`. `Main` returns exit code 1 if any `InfoLevel.Error` message was posted.
 
 ## Code layout
 
@@ -42,6 +42,7 @@ All verbs share `--trust-server-certificate` and `--log-file`. `Main` returns ex
 - `Program.Export.cs` — JSON/BCP export, `TableMetadataSql` (column list + deterministic sort order), `WriteJsonRows`, bcp argument/row-count helpers.
 - `Program.Import.cs` — BCP and JSON import, `ReadJsonValue` type conversion.
 - `Program.Copy.cs` — server-to-server copy.
+- `Program.Snapshot.cs` — `--snapshot`: `DatabaseSnapshot` (IDisposable, drops on dispose), `SnapshotName`, `SnapshotFilePath` (Windows/Linux server paths), `BuildCreateSnapshotSql`, `CreateSnapshot`.
 - `Program.Sql.cs` — `TableRef`, `BuildSourceObjectIDList` (filters → T-SQL), `GetSourceTables`, `GetTableObject`, `QuoteName`/`SqlLiteral`/`LikeLiteral`.
 - `SqlConnectionFactory.cs` — connection strings via `SqlConnectionStringBuilder`; `TryOpen` for validation.
 - `SqlBulkCopyHelper.cs` — rows-copied via reflection (member name differs across SqlClient versions).

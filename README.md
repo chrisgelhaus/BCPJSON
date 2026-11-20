@@ -79,6 +79,7 @@ bcpjson export --source-database AdventureWorks --file-format json --export-path
 | `--trust-server-certificate` | Accept the server's TLS certificate without validation (typical for local instances). |
 | `--log-file` | Also append all console messages to this file. |
 | `--max-tasks` | Maximum tables exported in parallel (default unlimited). |
+| `--snapshot` | Export from a database snapshot so every table reflects the same moment (see [Consistent exports](#consistent-exports)). |
 
 **Output files**
 
@@ -109,9 +110,19 @@ bcpjson import --file-format bcp --source-path C:\dumps\aw --source-file Sales.C
 | `--target-table` | Load into this table instead of the one named by the file. |
 | `--truncate-target` | Truncate the table before loading. |
 | `--max-tasks` | Maximum files imported in parallel (default unlimited). |
+| `--no-table-lock` | Load without a table lock (see [Table locking](#table-locking)). |
 | `--trust-server-certificate`, `--log-file` | As for export. |
 
 Identity values and NULLs are preserved. Computed and `rowversion` columns are skipped and recalculated by the server.
+
+#### Table locking
+
+By default every load (JSON import, BCP import and copy) takes a table lock (`TABLOCK`). That is the fastest way to bulk load: SQL Server takes one lock instead of thousands of row/page locks, and under the SIMPLE or BULK_LOGGED recovery model the load can be minimally logged.
+
+Use `--no-table-lock` when:
+
+- **the target table is live** — the lock blocks other sessions from reading (unless they use snapshot/RCSI or NOLOCK) and writing the table until the load finishes;
+- **several files load into the same table with a clustered index** (for example `--source-file "*.json" --target-table dbo.X`) — table-locked loads into one indexed table run one at a time instead of in parallel. Heaps are fine: their bulk-update locks are compatible.
 
 ### Copy
 
@@ -121,7 +132,24 @@ bcpjson copy --source-server PROD01 --source-database Sales `
              --include-schemas dbo --drop-target --max-tasks 4
 ```
 
-Copy accepts the same table/schema filters as export, plus `--drop-target`, `--truncate-target`, `--max-tasks` (default unlimited) and `--nolock`. Missing target tables are created from the source definition (columns, nullability, identity, defaults, computed columns). Tables with geography, geometry or hierarchyid columns are moved with `bcp` through a temporary folder.
+Copy accepts the same table/schema filters as export, plus `--drop-target`, `--truncate-target`, `--max-tasks` (default unlimited), `--nolock`, `--no-table-lock` and `--snapshot`. Missing target tables are created from the source definition (columns, nullability, identity, defaults, computed columns). Tables with geography, geometry or hierarchyid columns are moved with `bcp` through a temporary folder.
+
+### Consistent exports
+
+Tables are read one after another (or a few at a time), so on a busy database a long export is not a single point in time: a table read late in the run can contain changes — new orders, say — whose related rows in a table read earlier were not captured.
+
+`--snapshot` (on `export` and `copy`) fixes this. bcpJson creates a [database snapshot](https://learn.microsoft.com/sql/relational-databases/databases/database-snapshots-sql-server) of the source, reads every table from it, and drops it at the end, so all files reflect the moment the snapshot was created. It works with JSON and BCP and with parallel exports.
+
+Requirements and costs:
+
+- SQL Server 2016 SP1 or later (any edition; earlier versions need Enterprise/Developer). Not available on Azure SQL Database.
+- `CREATE DATABASE` permission on the source server. The sparse snapshot files are created next to the source data files.
+- While the snapshot exists, the first change to each source page copies the old page into the snapshot, which costs some write I/O and disk space on a busy source.
+- Databases with memory-optimized (In-Memory OLTP) filegroups cannot be snapshotted.
+
+If a run is killed before it can clean up, drop the leftover `<database>_bcpjson_<timestamp>` database manually.
+
+`--nolock` is the opposite trade-off: it avoids blocking writers but can read uncommitted and inconsistent data, and should not be combined with expectations of a consistent backup.
 
 ## JSON format
 
@@ -159,6 +187,7 @@ The solution `BcpJson.sln` holds the app in `src/BcpJson/` and the xUnit tests i
 | `Program.Export.cs` | JSON and BCP export, per-table metadata query |
 | `Program.Import.cs` | JSON (SqlBulkCopy) and BCP import |
 | `Program.Copy.cs` | Server-to-server copy (SMO + SqlBulkCopy) |
+| `Program.Snapshot.cs` | Database snapshots for `--snapshot` |
 | `Program.Sql.cs` | Table selection, name quoting, shared SQL helpers |
 | `ExportOptions.cs`, `ImportOptions.cs`, `CopyOptions.cs` | Command-line options for each verb |
 | `SqlConnectionFactory.cs` | Connection string building and connection tests |

@@ -84,6 +84,21 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Table_lock_and_snapshot_options()
+        {
+            Assert.False(Parsed<ImportOptions>("import", "--file-format", "bcp", "--source-file", "x.bcp").NoTableLock);
+            Assert.True(Parsed<ImportOptions>("import", "--file-format", "bcp", "--source-file", "x.bcp", "--no-table-lock").NoTableLock);
+
+            var copy = Parsed<CopyOptions>("copy", "--no-table-lock", "--snapshot");
+            Assert.True(copy.NoTableLock);
+            Assert.True(copy.Snapshot);
+            Assert.False(Parsed<CopyOptions>("copy").Snapshot);
+
+            Assert.True(Parsed<ExportOptions>("export", "--snapshot").Snapshot);
+            Assert.False(Parsed<ExportOptions>("export").Snapshot);
+        }
+
+        [Fact]
         public void Unknown_verb_fails()
         {
             Assert.IsType<NotParsed<object>>(Parse("backup"));

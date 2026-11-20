@@ -85,9 +85,10 @@ namespace bcpJson
                     }
 
                     // -E keeps identity values and -k keeps NULLs, so the load is a faithful restore of the export.
+                    // -h "TABLOCK" (default) enables minimal logging and avoids row/page locks.
                     string outputLog = baseFileName + "_import_output.log";
-                    string args = string.Format("{0} in {1} -f {2} {3} -E -k -b 10000 -e {4}",
-                        Arg(qualifiedName), Arg(file.Name), Arg(formatFile), connectionArgs, Arg(baseFileName + "_import_error.log"));
+                    string args = string.Format("{0} in {1} -f {2} {3} -E -k -b 10000{4} -e {5}",
+                        Arg(qualifiedName), Arg(file.Name), Arg(formatFile), connectionArgs, BcpLoadHints(options.NoTableLock), Arg(baseFileName + "_import_error.log"));
 
                     if (ExecuteProcess(BcpTool, args, workingPath, outputLog) == 0)
                     {
@@ -186,8 +187,7 @@ namespace bcpJson
                 }
 
                 long rows = 0;
-                var bulkOptions = SqlBulkCopyOptions.KeepIdentity | SqlBulkCopyOptions.KeepNulls | SqlBulkCopyOptions.TableLock;
-                using (var bulkCopy = new SqlBulkCopy(conn, bulkOptions, null))
+                using (var bulkCopy = new SqlBulkCopy(conn, LoadOptions(options.NoTableLock), null))
                 {
                     bulkCopy.DestinationTableName = bulkTarget;
                     bulkCopy.BulkCopyTimeout = 0;

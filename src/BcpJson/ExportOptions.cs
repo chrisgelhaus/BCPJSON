@@ -57,6 +57,9 @@ namespace bcpJson
         [Option("max-tasks", Default = -1, Required = false, HelpText = "Maximum tables exported in parallel (0 or -1 = unlimited).")]
         public int MaxParallelTasks { get; set; }
 
+        [Option("snapshot", Default = false, Required = false, HelpText = "Export from a database snapshot of the source so every table reflects the same point in time, however long the export runs. Needs CREATE DATABASE permission and SQL Server 2016 SP1+ (any edition); the snapshot is dropped afterwards.")]
+        public bool Snapshot { get; set; }
+
         public bool IsQueryExport
         {
             get { return !string.IsNullOrEmpty(this.Query); }
@@ -77,6 +80,12 @@ namespace bcpJson
             if (string.IsNullOrEmpty(this.Query) && string.IsNullOrEmpty(this.srcDatabase))
             {
                 Program.PostToConsole("Specify --source-database (table export) or --source-query (query export).", Program.InfoLevel.Error);
+                return false;
+            }
+
+            if (this.Snapshot && string.IsNullOrEmpty(this.srcDatabase))
+            {
+                Program.PostToConsole("--snapshot needs --source-database (the database to snapshot).", Program.InfoLevel.Error);
                 return false;
             }
 
