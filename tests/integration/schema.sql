@@ -49,7 +49,7 @@ CREATE TABLE rt.AllTypes
     c_image            IMAGE            NULL,
     c_uniqueidentifier UNIQUEIDENTIFIER NULL,
     c_xml              XML              NULL,
-    c_computed         AS (c_int * 2)
+    c_computed         AS (CAST(c_int AS BIGINT) * 2)
 );
 
 CREATE TABLE rt.[odd ]] name's]
