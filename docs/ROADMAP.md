@@ -2,7 +2,7 @@
 
 Handoff notes so any Claude session (chat, web or terminal) can pick up where the last one stopped.
 
-## Done (branch `refactor/fixes-and-json-import`, 2026-11-20)
+## Done (branch `refactor/fixes-and-json-import`, merged to master via PR #13 on 2026-11-20)
 
 - Split `Program.cs` into `Program.*.cs` partial files per verb; removed dead code.
 - Fixed: password option names (trailing space), SQL-login support in bcp/SMO paths, thread-safe row totals, identifier quoting/escaping, 30 s command timeouts on exports, broken `SqlBulkCopyHelper`, copy of computed/rowversion/identity columns, PK sort order, `--log-file` and `--source-query` (export) now implemented.
@@ -20,6 +20,7 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 - CI/testing runs on GitHub Actions (repo is public, so standard runners are free). SQL Server for integration tests = service container (`mcr.microsoft.com/mssql/server:2022-latest`).
 - Releases are published as GitHub Releases from version tags.
 - No local SQL Server on the dev machine; all database testing happens in GitHub Actions.
+- All changes reach `master` through a PR with green CI (branch protection, step 6).
 
 ## Next steps (in order)
 
@@ -29,7 +30,7 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 4. ~~Unit tests (no DB)~~ — done: 68 tests for `BuildSourceObjectIDList`, `QuoteName`/`SqlLiteral`/`LikeLiteral`/`TableRef`, `ReadJsonValue` (every CLR type, NULLs, precision, offsets, invariant culture), `SqlConnectionFactory.Build`, CLI parsing for all verbs.
 5. ~~CI workflow~~ — done and green: `.github/workflows/ci.yml` (build + 77 unit tests on ubuntu and windows; integration job with SQL Server 2022 container + mssql-tools18 running `tests/integration/roundtrip.sh`). Code calls `bcp` instead of `bcp.exe`.
    - Follow-ups: bump actions off Node 20 (`checkout`/`setup-dotnet`/`upload-artifact` v4 warn); `decimal` values beyond 28-29 significant digits are untested (likely overflow in SqlClient); copy does not create primary keys/indexes on the target.
-6. **Branch protection** on `master`: require CI to pass.
+6. ~~Branch protection~~ — done (classic protection on `master`): the three CI checks are required (pinned to the GitHub Actions app), branch must be up to date before merging, no force-push or deletion. No required reviews and admins may bypass (single maintainer). If a CI job is renamed, update the required check names too or merges will block.
 7. **Release workflow** (`.github/workflows/release.yml`) on `v*` tags: tag-driven version (MinVer or `-p:Version`), `dotnet publish` single-file for win-x64, win-arm64 (+ linux-x64: bcp paths now verified on Linux), zip + SHA-256 checksums, `actions/attest-build-provenance`, GitHub Release with generated notes.
 8. **Security/maintenance:** Dependabot for `nuget` and `github-actions`, CodeQL for C#, secret scanning + push protection. Then upgrade Microsoft.Data.SqlClient and SMO under test.
 9. **Later:** winget manifest, `dotnet tool` package on NuGet.org, GHCR container image, Windows code signing (Azure Trusted Signing).
