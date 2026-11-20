@@ -229,9 +229,9 @@ SELECT @Columns, @SortOrder;";
 
                 // Data
                 string outputLog = name + "_output.log";
-                string exportArgs = string.Format("{0} out {1} {2} -c -t| -m 1 -b 10000 -K ReadOnly -e {3} -o {4}",
-                    Arg(table.QuotedName), Arg(name + ".bcp"), connectionArgs, Arg(name + "_error.log"), Arg(outputLog));
-                if (ExecuteProcess(BcpTool, exportArgs, outputPath) == 0)
+                string exportArgs = string.Format("{0} out {1} {2} -c -t| -m 1 -b 10000 -K ReadOnly -e {3}",
+                    Arg(table.QuotedName), Arg(name + ".bcp"), connectionArgs, Arg(name + "_error.log"));
+                if (ExecuteProcess(BcpTool, exportArgs, outputPath, outputLog) == 0)
                 {
                     long rows = ReadBcpRowCount(Path.Combine(outputPath, outputLog));
                     if (rows > 0)
@@ -260,10 +260,10 @@ SELECT @Columns, @SortOrder;";
             string connectionArgs = BcpConnectionArgs(options.srcServer, options.srcDatabase, options.srcLogin, options.srcPassword, options.TrustServerCertificate);
             string name = options.OutputName;
             string outputLog = name + "_output.log";
-            string args = string.Format("{0} queryout {1} {2} -c -t| -m 1 -b 10000 -K ReadOnly -e {3} -o {4}",
-                Arg(options.Query), Arg(name + ".bcp"), connectionArgs, Arg(name + "_error.log"), Arg(outputLog));
+            string args = string.Format("{0} queryout {1} {2} -c -t| -m 1 -b 10000 -K ReadOnly -e {3}",
+                Arg(options.Query), Arg(name + ".bcp"), connectionArgs, Arg(name + "_error.log"));
 
-            if (ExecuteProcess(BcpTool, args, options.exportPath) != 0)
+            if (ExecuteProcess(BcpTool, args, options.exportPath, outputLog) != 0)
             {
                 PostToConsole(string.Format("{0}: bcp export failed. See {0}_error.log and {1}.", name, outputLog), InfoLevel.Error);
                 return -1;
