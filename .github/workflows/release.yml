@@ -77,7 +77,7 @@ jobs:
     name: Publish ${{ matrix.rid }}
     needs: [version, ci]
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - rid: win-x64
@@ -109,11 +109,18 @@ jobs:
         shell: bash
         run: |
           ls -l out
-          ./out/${{ matrix.exe }} --version | tee version.txt
+          exe=./out/${{ matrix.exe }}
+          # --version and --help must succeed and write to stdout only (stderr is for errors).
+          "$exe" --version > version.txt 2> stderr.txt
+          cat version.txt
           grep -q "${{ needs.version.outputs.version }}" version.txt
-          ./out/${{ matrix.exe }} export --help > /dev/null
-          ./out/${{ matrix.exe }} import --help > /dev/null
-          ./out/${{ matrix.exe }} copy --help > /dev/null
+          for verb in export import copy; do
+            "$exe" $verb --help > help.txt 2>> stderr.txt
+            grep -q -- "--help" help.txt
+          done
+          if [ -s stderr.txt ]; then echo "::error::help/version wrote to stderr:"; cat stderr.txt; exit 1; fi
+          # A usage error must exit 1.
+          if "$exe" no-such-verb > /dev/null 2>&1; then echo "::error::unknown verb did not fail"; exit 1; fi
 
       - uses: actions/upload-artifact@v4
         with:

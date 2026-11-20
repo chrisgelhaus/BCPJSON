@@ -113,6 +113,57 @@ namespace bcpJson.Tests
             Assert.Equal(expected, Program.ExitCodeForParseErrors(notParsed.Errors));
         }
 
+        private static (int ExitCode, string Stdout, string Stderr) Report(params string[] args)
+        {
+            ParserResult<object> result = Parse(args);
+            var notParsed = Assert.IsType<NotParsed<object>>(result);
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            int exitCode = Program.ReportParseErrors(result, notParsed.Errors, stdout, stderr);
+            return (exitCode, stdout.ToString(), stderr.ToString());
+        }
+
+        [Fact]
+        public void Version_is_one_line_on_stdout()
+        {
+            var (exitCode, stdout, stderr) = Report("--version");
+            Assert.Equal(0, exitCode);
+            // The heading names the entry assembly (testhost here, bcpjson in the real exe; checked by release.yml).
+            Assert.Single(stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries));
+            Assert.Equal("", stderr);
+        }
+
+        [Fact]
+        public void Help_goes_to_stdout()
+        {
+            var (exitCode, stdout, stderr) = Report("--help");
+            Assert.Equal(0, exitCode);
+            Assert.Contains("export", stdout);
+            Assert.Contains("import", stdout);
+            Assert.Contains("copy", stdout);
+            Assert.Equal("", stderr);
+
+            (exitCode, stdout, stderr) = Report("export", "--help");
+            Assert.Equal(0, exitCode);
+            Assert.Contains("--source-server", stdout);
+            Assert.Contains("--snapshot", stdout);
+            Assert.Equal("", stderr);
+        }
+
+        [Fact]
+        public void Usage_errors_go_to_stderr()
+        {
+            var (exitCode, stdout, stderr) = Report("backup");
+            Assert.Equal(1, exitCode);
+            Assert.Equal("", stdout);
+            Assert.Contains("Verb 'backup' is not recognized", stderr);
+
+            (exitCode, stdout, stderr) = Report("import", "--file-format", "json");
+            Assert.Equal(1, exitCode);
+            Assert.Equal("", stdout);
+            Assert.Contains("source-file", stderr);
+        }
+
         [Fact]
         public void Unknown_verb_fails()
         {

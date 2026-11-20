@@ -1,4 +1,5 @@
 ﻿using CommandLine;
+using CommandLine.Text;
 using Microsoft.Data.SqlClient;
 using System;
 using System.ComponentModel;
@@ -23,12 +24,30 @@ namespace bcpJson
 
         static int Main(string[] args)
         {
-            return Parser.Default.ParseArguments<ExportOptions, ImportOptions, CopyOptions>(args)
-                .MapResult(
+            // HelpWriter = null: the parser would write all help/version/error text to stderr. ReportParseErrors
+            // writes requested help and version to stdout instead, and only real usage errors to stderr.
+            using (var parser = new Parser(settings => settings.HelpWriter = null))
+            {
+                ParserResult<object> result = parser.ParseArguments<ExportOptions, ImportOptions, CopyOptions>(args);
+                return result.MapResult(
                     (ExportOptions opts) => ExportData(opts),
                     (ImportOptions opts) => ImportData(opts),
                     (CopyOptions opts) => CopyData(opts),
-                    ExitCodeForParseErrors);
+                    errors => ReportParseErrors(result, errors, Console.Out, Console.Error));
+            }
+        }
+
+        /// <summary>
+        /// Writes the parser's help text for a run that did not reach a verb: --help and --version go to
+        /// <paramref name="stdout"/> (exit 0); usage errors go to <paramref name="stderr"/> (exit 1).
+        /// </summary>
+        internal static int ReportParseErrors(ParserResult<object> result, IEnumerable<Error> errors, TextWriter stdout, TextWriter stderr)
+        {
+            var list = errors.ToList();
+            int exitCode = ExitCodeForParseErrors(list);
+            // Same text the parser would have written: version heading, verb list, option help or error messages.
+            (exitCode == 0 ? stdout : stderr).Write(HelpText.AutoBuild(result));
+            return exitCode;
         }
 
         /// <summary>
