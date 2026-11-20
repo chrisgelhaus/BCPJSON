@@ -317,6 +317,7 @@ Each file is a JSON array with one object per row, one row per line:
 - `sql_variant` values are re-imported as `nvarchar`.
 - `copy --source-query` is not supported.
 - `copy` recreates keys and indexes but not foreign keys, check constraints or triggers, and places indexes on the target's default filegroup.
+- BCP import into a table whose schema or table name contains `.` or `"` **and** that has a filtered, XML or spatial index fails (bcp cannot set `QUOTED_IDENTIFIER ON` for such names). Use JSON import for that table.
 - `-k` on export is reserved; JSON always writes NULLs.
 
 ## Releasing

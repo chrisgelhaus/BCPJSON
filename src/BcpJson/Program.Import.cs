@@ -33,6 +33,22 @@ namespace bcpJson
             return null;
         }
 
+        /// <summary>
+        /// Table argument for <c>bcp in</c>. SQL Server rejects inserts into tables with filtered, XML or spatial
+        /// indexes (and indexed views/computed columns) unless QUOTED_IDENTIFIER is ON, which bcp only sets with -q.
+        /// With -q, bcp splits the name on '.' and quotes each part itself, so it must be passed unbracketed as
+        /// schema.table (verified against SQL Server 2022 with names containing spaces, ']' and '''). A schema or
+        /// table name containing '.' or '"' cannot be expressed that way; it is passed bracketed without -q, which
+        /// works for every table except those index types.
+        /// </summary>
+        internal static string BcpInTarget(string schema, string table)
+        {
+            bool splittable = schema.IndexOf('.') < 0 && table.IndexOf('.') < 0 && schema.IndexOf('"') < 0 && table.IndexOf('"') < 0;
+            return splittable
+                ? Arg(schema + "." + table) + " -q"
+                : Arg(QuoteName(schema) + "." + QuoteName(table));
+        }
+
         private static FileInfo[] FindSourceFiles(ImportOptions options)
         {
             FileInfo[] files = new DirectoryInfo(options.SourcePath).GetFiles(options.SourceFile, SearchOption.TopDirectoryOnly);
@@ -86,11 +102,10 @@ namespace bcpJson
 
                     // -E keeps identity values and -k keeps NULLs, so the load is a faithful restore of the export.
                     // -h "TABLOCK" (default) enables minimal logging and avoids row/page locks.
-                    // -q sets QUOTED_IDENTIFIER ON (bcp defaults to OFF), which SQL Server requires for inserts into
-                    // tables with filtered, XML or spatial indexes, indexed views or indexed computed columns.
+                    // BcpInTarget adds -q (QUOTED_IDENTIFIER ON) whenever the name allows it.
                     string outputLog = baseFileName + "_import_output.log";
-                    string args = string.Format("{0} in {1} -f {2} {3} -E -k -q -b 10000{4} -e {5}",
-                        Arg(qualifiedName), Arg(file.Name), Arg(formatFile), connectionArgs, BcpLoadHints(options.NoTableLock), Arg(baseFileName + "_import_error.log"));
+                    string args = string.Format("{0} in {1} -f {2} {3} -E -k -b 10000{4} -e {5}",
+                        BcpInTarget(target[0], target[1]), Arg(file.Name), Arg(formatFile), connectionArgs, BcpLoadHints(options.NoTableLock), Arg(baseFileName + "_import_error.log"));
 
                     if (ExecuteProcess(BcpTool, args, workingPath, outputLog) == 0)
                     {
