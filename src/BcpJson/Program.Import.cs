@@ -17,6 +17,22 @@ namespace bcpJson
         /// <summary>A target column that can be loaded (computed and rowversion columns are skipped).</summary>
         private sealed record ImportColumn(string Name, string TypeName, bool IsIdentity, bool IsClrType);
 
+        /// <summary>
+        /// Returns the format file name for a .bcp data file: <c>&lt;name&gt;-c.fmt</c>, or the XML <c>&lt;name&gt;-c.xml</c>
+        /// written by older Windows exports. Null if neither exists.
+        /// </summary>
+        internal static string FindBcpFormatFile(string folder, string baseFileName)
+        {
+            foreach (string suffix in new[] { BcpFormatFileSuffix, LegacyBcpFormatFileSuffix })
+            {
+                if (File.Exists(Path.Combine(folder, baseFileName + suffix)))
+                {
+                    return baseFileName + suffix;
+                }
+            }
+            return null;
+        }
+
         private static FileInfo[] FindSourceFiles(ImportOptions options)
         {
             FileInfo[] files = new DirectoryInfo(options.SourcePath).GetFiles(options.SourceFile, SearchOption.TopDirectoryOnly);
@@ -50,10 +66,11 @@ namespace bcpJson
                     string qualifiedName = QuoteName(target[0]) + "." + QuoteName(target[1]);
                     string label = target[0] + "." + target[1];
 
-                    string formatFile = baseFileName + "-c.xml";
-                    if (!File.Exists(Path.Combine(workingPath, formatFile)))
+                    string formatFile = FindBcpFormatFile(workingPath, baseFileName);
+                    if (formatFile == null)
                     {
-                        PostToConsole(string.Format("{0}: Format file {1} not found next to the data file.", label, formatFile), InfoLevel.Error);
+                        PostToConsole(string.Format("{0}: Format file {1}{2} (or {1}{3}) not found next to the data file.",
+                            label, baseFileName, BcpFormatFileSuffix, LegacyBcpFormatFileSuffix), InfoLevel.Error);
                         return;
                     }
 

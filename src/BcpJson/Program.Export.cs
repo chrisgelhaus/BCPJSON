@@ -217,9 +217,9 @@ SELECT @Columns, @SortOrder;";
             {
                 string name = table.DisplayName;
 
-                // Format file (used by import to map columns)
-                string formatArgs = string.Format("{0} format nul {1} -c -x -f {2} -t|",
-                    Arg(table.QuotedName), connectionArgs, Arg(name + "-c.xml"));
+                // Format file (used by import to map columns). Non-XML, because the Linux bcp does not support -x.
+                string formatArgs = string.Format("{0} format nul {1} -c -f {2} -t|",
+                    Arg(table.QuotedName), connectionArgs, Arg(name + BcpFormatFileSuffix));
                 if (ExecuteProcess(BcpTool, formatArgs, outputPath) != 0)
                 {
                     PostToConsole(string.Format("{0}: Error creating format file.", name), InfoLevel.Error);

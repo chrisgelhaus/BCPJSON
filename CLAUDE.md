@@ -29,7 +29,7 @@ dotnet publish src/BcpJson -c Release             # single-file exe (PublishSing
 | Verb | Options class | Entry | Notes |
 |---|---|---|---|
 | `export` | `ExportOptions.cs` | `ExportData` → `ExportToBCP` / `ExportToJSON` / `ExportQueryTo*` | `--file-format bcp\|json`, table/schema include/exclude filters (`*` wildcards; no include filter = all user tables), `--source-query` + `--output-name`, `--nolock` |
-| `import` | `ImportOptions.cs` | `ImportData` → `ImportFromBCP` / `ImportFromJSON` | Target table must exist. JSON import streams with `JsonTextReader` + `SqlBulkCopy`; CLR-type columns go through a `#bcpjson_stage` temp table and `::Parse()`. BCP import uses the `<schema>.<table>-c.xml` format file with `-E -k`. |
+| `import` | `ImportOptions.cs` | `ImportData` → `ImportFromBCP` / `ImportFromJSON` | Target table must exist. JSON import streams with `JsonTextReader` + `SqlBulkCopy`; CLR-type columns go through a `#bcpjson_stage` temp table and `::Parse()`. BCP import uses the `<schema>.<table>-c.fmt` format file (falls back to legacy `-c.xml`) with `-E -k`. |
 | `copy` | `CopyOptions.cs` | `CopyData` → `BulkCopyTables` → `CopyTable` | SMO creates/drops/truncates the target, `SqlBulkCopy` moves data; tables with geography/geometry/hierarchyid fall back to bcp export+import via a temp folder. |
 
 All verbs share `--trust-server-certificate` and `--log-file`. `Main` returns exit code 1 if any `InfoLevel.Error` message was posted.
@@ -49,7 +49,7 @@ All verbs share `--trust-server-certificate` and `--log-file`. `Main` returns ex
 
 ### Export format
 - JSON: `<schema>.<table>.json`, a JSON array, one row object per line (line-diffable). Ordered by PK, else by all sortable columns. CLR types (system_type_id 240) are written with `.ToString()`.
-- BCP: `bcp format` → `<schema>.<table>-c.xml`, `bcp out` → `<schema>.<table>.bcp` (char mode, `|` delimiter) plus `_error.log` / `_output.log`; row counts are parsed from the output log.
+- BCP: `bcp format` (non-XML; Linux bcp has no `-x`) → `<schema>.<table>-c.fmt`, `bcp out` → `<schema>.<table>.bcp` (char mode, `|` delimiter) plus `_error.log` / `_output.log`; row counts are parsed from the output log.
 
 ## Rules for changes
 

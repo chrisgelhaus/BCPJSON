@@ -128,6 +128,12 @@ namespace bcpJson
         /// </summary>
         private const string BcpTool = "bcp";
 
+        /// <summary>Non-XML bcp format file written next to each .bcp export (works with Windows and Linux bcp).</summary>
+        internal const string BcpFormatFileSuffix = "-c.fmt";
+
+        /// <summary>XML format file written by exports before the Linux-compatible change; still accepted on import.</summary>
+        internal const string LegacyBcpFormatFileSuffix = "-c.xml";
+
         /// <summary>
         /// Runs an external tool (bcp) and returns its exit code, or -1 if it could not be started.
         /// </summary>

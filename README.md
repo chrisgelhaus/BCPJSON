@@ -83,7 +83,7 @@ bcpjson export --source-database AdventureWorks --file-format json --export-path
 **Output files**
 
 - JSON: `<schema>.<table>.json`
-- BCP: `<schema>.<table>.bcp` (pipe-delimited character data), `<schema>.<table>-c.xml` (format file, needed for import), plus `_output.log` / `_error.log` from bcp.
+- BCP: `<schema>.<table>.bcp` (pipe-delimited character data), `<schema>.<table>-c.fmt` (format file, needed for import; older exports' `-c.xml` files are still accepted), plus `_output.log` / `_error.log` from bcp.
 
 ### Import
 
