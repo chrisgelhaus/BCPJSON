@@ -75,6 +75,18 @@ namespace bcpJson.Tests
             Assert.Equal(value.Value, ((SqlDecimal)Read(Write(value))).Value);
         }
 
+        [Theory]
+        [InlineData("decimal", true)]
+        [InlineData("numeric", true)]
+        [InlineData("DECIMAL", true)]
+        [InlineData("money", false)]
+        [InlineData("smallmoney", false)]
+        [InlineData("float", false)]
+        public void Only_decimal_and_numeric_use_SqlDecimal(string dataTypeName, bool expected)
+        {
+            Assert.Equal(expected, Program.IsSqlDecimalType(dataTypeName));
+        }
+
         [Fact]
         public void Null_quoted_and_exponent_values_are_read()
         {

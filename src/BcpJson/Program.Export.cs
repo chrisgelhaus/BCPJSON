@@ -172,6 +172,16 @@ SELECT @Columns, @SortOrder;";
         /// True when a SQL decimal fits System.Decimal (96-bit mantissa, scale up to 28). decimal(38, s) values can
         /// have up to 38 significant digits, which System.Decimal cannot hold.
         /// </summary>
+        /// <summary>
+        /// True for decimal/numeric. money/smallmoney also map to System.Decimal but always fit it, and their readers
+        /// return SqlMoney, so they keep the System.Decimal path.
+        /// </summary>
+        internal static bool IsSqlDecimalType(string dataTypeName)
+        {
+            return string.Equals(dataTypeName, "decimal", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(dataTypeName, "numeric", StringComparison.OrdinalIgnoreCase);
+        }
+
         internal static bool FitsSystemDecimal(SqlDecimal value)
         {
             return value.IsNull || (value.Data[3] == 0 && value.Scale <= 28);
@@ -197,7 +207,7 @@ SELECT @Columns, @SortOrder;";
         {
             long rows = 0;
             string[] names = Enumerable.Range(0, records.FieldCount).Select(records.GetName).ToArray();
-            bool[] isDecimal = Enumerable.Range(0, records.FieldCount).Select(i => records.GetFieldType(i) == typeof(decimal)).ToArray();
+            bool[] isDecimal = Enumerable.Range(0, records.FieldCount).Select(i => IsSqlDecimalType(records.GetDataTypeName(i))).ToArray();
 
             using (var jsonWriter = new JsonTextWriter(new StreamWriter(filePath, false)))
             {

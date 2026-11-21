@@ -322,7 +322,7 @@ ORDER BY c.column_id;";
                 {
                     // decimal(p > 28) values may not fit System.Decimal, so decimal columns are buffered as SqlDecimal.
                     Type type = reader.GetFieldType(i);
-                    buffer.Columns.Add(reader.GetName(i), type == typeof(decimal) ? typeof(SqlDecimal) : type);
+                    buffer.Columns.Add(reader.GetName(i), IsSqlDecimalType(reader.GetDataTypeName(i)) ? typeof(SqlDecimal) : type);
                 }
             }
             return buffer;
