@@ -284,6 +284,7 @@ bcpjson copy --source-server PROD01 --source-database Sales `
 
 ### Snapshot notes
 
+- **How it is tested.** On every change, CI runs a writer that keeps moving value between two 300,000-row tables in single transactions, so their combined total is constant at every committed moment. Two `export --snapshot` runs made while transfers are committing must each add up to exactly that total, and the same export *without* `--snapshot` must be caught drifting — proving that the check can tell the difference.
 - `--nolock` is unnecessary with `--snapshot` (a snapshot is read-only, so reads cannot block writers). Without `--snapshot`, `--nolock` is the opposite trade-off: it avoids blocking but can read uncommitted, inconsistent data — not something to rely on for backups.
 - `--snapshot` only affects the source. For `copy`, the target is written normally (and table-locked unless `--no-table-lock`).
 - If a run is killed before it can clean up, a snapshot database is left behind. Find and drop it:
