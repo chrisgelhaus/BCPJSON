@@ -216,7 +216,7 @@ Use `--no-check-constraints` when the target is a staging area that must accept 
 
 **Default:** off. **Option:** `--triggers` turns it on.
 
-With `--triggers`, `copy` recreates the DML triggers (`AFTER` and `INSTEAD OF`) of the tables it created, **after all tables are loaded**, so they never fire on the copied rows. Each trigger's definition is copied as is; disabled triggers stay disabled and the `FIRST` / `LAST` firing order set with `sp_settriggerorder` is kept.
+With `--triggers`, `copy` recreates the DML triggers (`AFTER` and `INSTEAD OF`) of the tables it created, **after all tables are loaded**, so they never fire on the copied rows. Each trigger's body is copied as is (the `CREATE TRIGGER ... ON ...` header is regenerated with bracketed names, which also keeps it correct for triggers renamed with `sp_rename`); disabled triggers stay disabled and the `FIRST` / `LAST` firing order set with `sp_settriggerorder` is kept.
 
 ```powershell
 # Full copy of the schema objects bcpJson handles: keys, indexes, check constraints, foreign keys and triggers

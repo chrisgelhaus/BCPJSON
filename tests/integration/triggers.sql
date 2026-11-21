@@ -14,7 +14,9 @@ SELECT s.name COLLATE DATABASE_DEFAULT + N'.' + t.name COLLATE DATABASE_DEFAULT
              ORDER BY te.type_desc
              FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N''), N'')
        + N' | disabled=' + CAST(tr.is_disabled AS NVARCHAR(1))
-       + N' | definition=' + OBJECT_DEFINITION(tr.object_id) COLLATE DATABASE_DEFAULT AS [trigger]
+       -- SMO regenerates the CREATE TRIGGER header with bracketed names (the body is copied verbatim), so brackets
+       -- are ignored when comparing definitions.
+       + N' | definition=' + REPLACE(REPLACE(OBJECT_DEFINITION(tr.object_id), N'[', N''), N']', N'') COLLATE DATABASE_DEFAULT AS [trigger]
 FROM sys.triggers tr
      JOIN sys.tables t ON t.object_id = tr.parent_id
      JOIN sys.schemas s ON s.schema_id = t.schema_id
