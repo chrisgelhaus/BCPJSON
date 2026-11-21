@@ -51,7 +51,7 @@ All verbs share `--trust-server-certificate`, `--log-file` and `--max-tasks` (vi
 - `CustomSelect.sql` — reference copy of `TableMetadataSql`; not loaded at runtime, keep in sync.
 
 ### Export format
-- JSON: `<schema>.<table>.json`, a JSON array, one row object per line (line-diffable). Ordered by PK, else by all sortable columns. CLR types (system_type_id 240) are written with `.ToString()`.
+- JSON: `<schema>.<table>.json`, a JSON array, one row object per line (line-diffable). Ordered by PK, else by all sortable columns. CLR types (system_type_id 240) are written with `.ToString()`. Decimals go through `WriteJsonDecimal`: values that fit System.Decimal are written as before, larger ones (up to 38 digits) as `SqlDecimal` text; JSON import buffers decimal columns as `SqlDecimal` (`ParseSqlDecimal`).
 - BCP: `bcp format` (non-XML; Linux bcp has no `-x`) → `<schema>.<table>-c.fmt`, `bcp out` → `<schema>.<table>.bcp` (char mode, `|` delimiter) plus `_error.log` / `_output.log`; row counts are parsed from the output log.
 
 ## Rules for changes

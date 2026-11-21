@@ -105,6 +105,24 @@ assert_no_snapshots() {
     echo "No database snapshots left behind."
 }
 
+# plain.Decimals as SQL Server's own text (all 38 digits), hashed: checks the values without going through bcpjson's export.
+decimals_hash() {
+    sql -d "$1" -h -1 -W -Q "SET NOCOUNT ON; SELECT CONCAT(COUNT(*), ' rows, sha256 ', CONVERT(VARCHAR(64), HASHBYTES('SHA2_256', STRING_AGG(CAST(CONCAT(Id, '|', Whole, '|', Mixed, '|', Half, '|', Fraction, '|', Small) AS NVARCHAR(MAX)), ';') WITHIN GROUP (ORDER BY Id)), 2)) FROM plain.Decimals;" | tr -d '\r'
+}
+
+# Fails unless a database holds exactly the source's 38-digit decimals.
+compare_decimals() {
+    local expected actual
+    expected="$(decimals_hash BcpJsonSource)"
+    actual="$(decimals_hash "$1")"
+    if [ "$expected" != "$actual" ]; then
+        echo "::error::plain.Decimals in $1 ($actual) differs from the source ($expected)"
+        sql -d "$1" -Q "SELECT * FROM plain.Decimals ORDER BY Id;"
+        return 1
+    fi
+    echo "plain.Decimals identical to the source: $actual"
+}
+
 # Empty database with the test schemas but no tables (copy creates them).
 create_empty_db() {
     local db="$1"
@@ -151,6 +169,12 @@ case "${1:-}" in
         mkdir -p "$WORK"
         export_json BcpJsonSource "$WORK/source-json"
         ls -l "$WORK/source-json"
+        # 38-digit decimals must be exported with every digit (System.Decimal holds only 28-29).
+        for v in '"Whole":99999999999999999999999999999999999999' '"Whole":-99999999999999999999999999999999999999' \
+                 '"Fraction":0.00000000000000000000000000000000000001' '"Half":1234567890123456789.0123456789012345678'; do
+            grep -qF "$v" "$WORK/source-json/plain.Decimals.json" || { echo "::error::plain.Decimals.json lacks $v"; exit 1; }
+        done
+        echo "38-digit decimals exported exactly."
         ;;
 
     json)
@@ -158,6 +182,7 @@ case "${1:-}" in
         bcpjson import "${TARGET[@]}" --target-database BcpJsonJson --file-format json --max-tasks 2 --source-path "$WORK/source-json" --source-file '*.json'
         # Documented behaviour: bulk loads don't check constraints, so SQL Server marks the target's foreign keys untrusted.
         echo "After import: $(sql -d BcpJsonJson -h -1 -W -Q "SET NOCOUNT ON; SELECT CONCAT(SUM(CAST(is_not_trusted AS INT)), ' of ', COUNT(*)) FROM sys.foreign_keys;" | tr -d '\r') foreign keys are not trusted."
+        compare_decimals BcpJsonJson
         export_json BcpJsonJson "$WORK/json-roundtrip"
         compare_exact "$WORK/source-json" "$WORK/json-roundtrip"
         ;;
@@ -169,6 +194,7 @@ case "${1:-}" in
         ls -l "$WORK/source-bcp"
         # Table locking is the default; this path covers --no-table-lock (JSON import and copy cover TABLOCK).
         bcpjson import "${TARGET[@]}" --target-database BcpJsonBcp --file-format bcp --no-table-lock --source-path "$WORK/source-bcp" --source-file '*.bcp'
+        compare_decimals BcpJsonBcp
         export_json BcpJsonBcp "$WORK/bcp-roundtrip" --include-schemas plain
         mkdir -p "$WORK/source-json-plain"
         rm -f "$WORK/source-json-plain"/*
@@ -182,6 +208,7 @@ case "${1:-}" in
         # the default index and check constraint recreation, --foreign-keys and --triggers.
         bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonCopy --snapshot --foreign-keys --triggers
         assert_no_snapshots
+        compare_decimals BcpJsonCopy
         export_json BcpJsonCopy "$WORK/copy-roundtrip"
         # Primary keys are recreated, so the copy exports in the same order as the source: compare exactly.
         # This includes rt.ChildAudit, which would gain rows if a trigger had fired during the copy.
@@ -201,6 +228,7 @@ case "${1:-}" in
         left="$(sql -d BcpJsonCopyNoIdx -h -1 -W -Q "SET NOCOUNT ON; SELECT (SELECT COUNT(*) FROM sys.indexes i JOIN sys.tables t ON t.object_id = i.object_id WHERE i.type > 0 AND t.is_ms_shipped = 0) + (SELECT COUNT(*) FROM sys.foreign_keys) + (SELECT COUNT(*) FROM sys.check_constraints) + (SELECT COUNT(*) FROM sys.triggers WHERE parent_class = 1);" | tr -d '[:space:]')"
         [ "$left" = "0" ] || { echo "::error::$left indexes, foreign keys, check constraints or triggers were created"; exit 1; }
         echo "--no-indexes --no-check-constraints: no indexes, foreign keys, check constraints or triggers created."
+        compare_decimals BcpJsonCopyNoIdx
         export_json BcpJsonCopyNoIdx "$WORK/copy-noidx"
         compare_unordered "$WORK/source-json" "$WORK/copy-noidx"
         ;;

@@ -2,6 +2,7 @@
 using Newtonsoft.Json;
 using System.Collections.Generic;
 using System.Data;
+using System.Data.SqlTypes;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -319,15 +320,34 @@ ORDER BY c.column_id;";
             {
                 for (int i = 0; i < reader.FieldCount; i++)
                 {
-                    buffer.Columns.Add(reader.GetName(i), reader.GetFieldType(i));
+                    // decimal(p > 28) values may not fit System.Decimal, so decimal columns are buffered as SqlDecimal.
+                    Type type = reader.GetFieldType(i);
+                    buffer.Columns.Add(reader.GetName(i), type == typeof(decimal) ? typeof(SqlDecimal) : type);
                 }
             }
             return buffer;
         }
 
+        /// <summary>Parses decimal text exactly (up to 38 digits); exponent notation goes through System.Decimal.</summary>
+        internal static SqlDecimal ParseSqlDecimal(string text)
+        {
+            text = text.Trim();
+            if (text.IndexOfAny(new[] { 'e', 'E' }) >= 0)
+            {
+                return new SqlDecimal(decimal.Parse(text, NumberStyles.Float, CultureInfo.InvariantCulture));
+            }
+            return SqlDecimal.Parse(text);
+        }
+
         /// <summary>Reads the next JSON value (the reader is on a property name) and converts it to the column type.</summary>
         internal static object ReadJsonValue(JsonTextReader json, Type type)
         {
+            if (type == typeof(SqlDecimal))
+            {
+                // ReadAsString keeps the number's text, so up to 38 significant digits survive.
+                string number = json.ReadAsString();
+                return number == null ? (object)DBNull.Value : ParseSqlDecimal(number);
+            }
             if (type == typeof(decimal))
             {
                 decimal? value = json.ReadAsDecimal();

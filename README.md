@@ -357,6 +357,7 @@ Each file is a JSON array with one object per row, one row per line:
 ```
 
 - Dates and times are ISO 8601; `datetimeoffset` keeps its offset.
+- `decimal`/`numeric` are JSON numbers with every digit, up to the full 38 digits of precision (beyond what .NET's `decimal` holds), and are read back exactly. A JSON parser in another tool may round very long numbers.
 - `binary`/`varbinary`/`image` are base64.
 - geography, geometry and hierarchyid are written as text (`POINT (-122.3 47.6)`, `/1/3/`) and parsed back on import.
 - NULL is written explicitly as `null`.
