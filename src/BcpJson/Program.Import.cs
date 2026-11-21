@@ -34,19 +34,23 @@ namespace bcpJson
         }
 
         /// <summary>
-        /// Table argument for <c>bcp in</c>. SQL Server rejects inserts into tables with filtered, XML or spatial
-        /// indexes (and indexed views/computed columns) unless QUOTED_IDENTIFIER is ON, which bcp only sets with -q.
-        /// With -q, bcp splits the name on '.' and quotes each part itself, so it must be passed unbracketed as
-        /// schema.table (verified against SQL Server 2022 with names containing spaces, ']' and '''). A schema or
-        /// table name containing '.' or '"' cannot be expressed that way; it is passed bracketed without -q, which
-        /// works for every table except those index types.
+        /// Command line for <c>bcp &lt;table&gt; in &lt;data&gt; -f &lt;format&gt; ...</c> (bcp requires the table first and the direction second).
+        /// <list type="bullet">
+        /// <item>-E keeps identity values and -k keeps NULLs, so the load is a faithful restore of the export.</item>
+        /// <item>-h "TABLOCK" (unless --no-table-lock) enables minimal logging and avoids row/page locks.</item>
+        /// <item>-q sets QUOTED_IDENTIFIER ON, without which SQL Server rejects inserts into tables with filtered, XML or
+        /// spatial indexes (and indexed views/computed columns). With -q, bcp splits the table name on '.' and quotes
+        /// each part itself, so the name must be passed unbracketed as schema.table (verified against SQL Server 2022
+        /// with names containing spaces, ']' and '''). A name containing '.' or '"' cannot be expressed that way and is
+        /// passed bracketed without -q, which works for every table except those index types.</item>
+        /// </list>
         /// </summary>
-        internal static string BcpInTarget(string schema, string table)
+        internal static string BcpInArguments(string schema, string table, string dataFile, string formatFile, string connectionArgs, bool noTableLock, string errorLog)
         {
             bool splittable = schema.IndexOf('.') < 0 && table.IndexOf('.') < 0 && schema.IndexOf('"') < 0 && table.IndexOf('"') < 0;
-            return splittable
-                ? Arg(schema + "." + table) + " -q"
-                : Arg(QuoteName(schema) + "." + QuoteName(table));
+            string tableArg = splittable ? Arg(schema + "." + table) : Arg(QuoteName(schema) + "." + QuoteName(table));
+            return string.Format("{0} in {1} -f {2} {3} -E -k{4} -b 10000{5} -e {6}",
+                tableArg, Arg(dataFile), Arg(formatFile), connectionArgs, splittable ? " -q" : string.Empty, BcpLoadHints(noTableLock), Arg(errorLog));
         }
 
         private static FileInfo[] FindSourceFiles(ImportOptions options)
@@ -100,12 +104,8 @@ namespace bcpJson
                         PostToConsole(string.Format("{0}: Truncate Complete.", label));
                     }
 
-                    // -E keeps identity values and -k keeps NULLs, so the load is a faithful restore of the export.
-                    // -h "TABLOCK" (default) enables minimal logging and avoids row/page locks.
-                    // BcpInTarget adds -q (QUOTED_IDENTIFIER ON) whenever the name allows it.
                     string outputLog = baseFileName + "_import_output.log";
-                    string args = string.Format("{0} in {1} -f {2} {3} -E -k -b 10000{4} -e {5}",
-                        BcpInTarget(target[0], target[1]), Arg(file.Name), Arg(formatFile), connectionArgs, BcpLoadHints(options.NoTableLock), Arg(baseFileName + "_import_error.log"));
+                    string args = BcpInArguments(target[0], target[1], file.Name, formatFile, connectionArgs, options.NoTableLock, baseFileName + "_import_error.log");
 
                     if (ExecuteProcess(BcpTool, args, workingPath, outputLog) == 0)
                     {
