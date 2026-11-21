@@ -81,6 +81,17 @@ CREATE TABLE plain.Numbers
     Uid    UNIQUEIDENTIFIER NOT NULL
 );
 
+-- Full 38-digit precision: values beyond System.Decimal's 28-29 significant digits.
+CREATE TABLE plain.Decimals
+(
+    Id        INT             NOT NULL PRIMARY KEY,
+    Whole     DECIMAL(38, 0)  NULL,
+    Mixed     DECIMAL(38, 10) NULL,
+    Half      NUMERIC(38, 19) NULL,
+    Fraction  DECIMAL(38, 38) NULL,
+    Small     DECIMAL(29, 2)  NULL
+);
+
 CREATE TABLE plain.IdentityGaps
 (
     Id   INT IDENTITY(1000, 5) NOT NULL PRIMARY KEY,

@@ -2,6 +2,7 @@
 using Newtonsoft.Json;
 using System.Collections.Generic;
 using System.Data;
+using System.Data.SqlTypes;
 using System.Globalization;
 using System.IO;
 using System.Linq;
@@ -167,10 +168,46 @@ SELECT @Columns, @SortOrder;";
         /// Writes rows as a JSON array with one object per line, so exports can be compared with line-based diff tools.
         /// NULLs are written as null; binary as base64; dates in ISO 8601.
         /// </summary>
+        /// <summary>
+        /// True when a SQL decimal fits System.Decimal (96-bit mantissa, scale up to 28). decimal(38, s) values can
+        /// have up to 38 significant digits, which System.Decimal cannot hold.
+        /// </summary>
+        /// <summary>
+        /// True for decimal/numeric. money/smallmoney also map to System.Decimal but always fit it, and their readers
+        /// return SqlMoney, so they keep the System.Decimal path.
+        /// </summary>
+        internal static bool IsSqlDecimalType(string dataTypeName)
+        {
+            return string.Equals(dataTypeName, "decimal", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(dataTypeName, "numeric", StringComparison.OrdinalIgnoreCase);
+        }
+
+        internal static bool FitsSystemDecimal(SqlDecimal value)
+        {
+            return value.IsNull || (value.Data[3] == 0 && value.Scale <= 28);
+        }
+
+        /// <summary>
+        /// Writes a non-NULL decimal as a JSON number. Values that fit System.Decimal are written exactly as before;
+        /// larger ones are written from SqlDecimal's own (culture-invariant) text, so no digit is lost.
+        /// </summary>
+        internal static void WriteJsonDecimal(JsonWriter writer, SqlDecimal value)
+        {
+            if (FitsSystemDecimal(value))
+            {
+                writer.WriteValue(value.Value);
+            }
+            else
+            {
+                writer.WriteRawValue(value.ToString());
+            }
+        }
+
         private static long WriteJsonRows(SqlDataReader records, string filePath, string label)
         {
             long rows = 0;
             string[] names = Enumerable.Range(0, records.FieldCount).Select(records.GetName).ToArray();
+            bool[] isDecimal = Enumerable.Range(0, records.FieldCount).Select(i => IsSqlDecimalType(records.GetDataTypeName(i))).ToArray();
 
             using (var jsonWriter = new JsonTextWriter(new StreamWriter(filePath, false)))
             {
@@ -181,7 +218,14 @@ SELECT @Columns, @SortOrder;";
                     for (int i = 0; i < names.Length; i++)
                     {
                         jsonWriter.WritePropertyName(names[i]);
-                        jsonWriter.WriteValue(records.GetValue(i));
+                        if (isDecimal[i] && !records.IsDBNull(i))
+                        {
+                            WriteJsonDecimal(jsonWriter, records.GetSqlDecimal(i));
+                        }
+                        else
+                        {
+                            jsonWriter.WriteValue(records.GetValue(i));
+                        }
                     }
                     jsonWriter.WriteEndObject();
                     jsonWriter.WriteWhitespace(Environment.NewLine);

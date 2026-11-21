@@ -25,7 +25,7 @@ VALUES (2, 42, 7, 3, 1, 1, 12345.6789012345, 1.5, 19.99, 2.5, 3.141592653589793,
         0x0102030405060708, 0xDEADBEEF, CONVERT(VARBINARY(MAX), REPLICATE(CAST('AB' AS VARCHAR(MAX)), 10000)), 0x00FF,
         '6F9619FF-8B86-D011-B42D-00C04FC964FF', N'<root a="1"><child>text &amp; more</child></root>');
 
--- Row 3: maximum values (c_decimal stays within the 28-29 significant digits System.Decimal can hold)
+-- Row 3: maximum values (full 38-digit decimals are in plain.Decimals)
 INSERT rt.AllTypes (Id, c_bigint, c_int, c_smallint, c_tinyint, c_bit, c_decimal, c_numeric, c_money, c_smallmoney, c_float, c_real,
                     c_date, c_time, c_datetime, c_datetime2, c_smalldatetime, c_datetimeoffset,
                     c_char, c_varchar, c_nchar, c_nvarchar, c_binary, c_varbinary, c_uniqueidentifier)
@@ -72,6 +72,27 @@ SELECT i,
        DATEADD(SECOND, i, CAST('2020-01-01T00:00:00.123' AS DATETIME2(3))),
        NEWID()
 FROM n;
+
+-- 38-digit decimals: maximum, minimum, smallest fraction, values at and just past System.Decimal's limit
+-- (79228162514264337593543950335), ordinary values and NULLs.
+-- One INSERT per row: a multi-row VALUES gives each column one common type, which overflows when 38-digit
+-- fractions are mixed with integers.
+INSERT plain.Decimals (Id, Whole, Mixed, Half, Fraction, Small) VALUES (1, NULL, NULL, NULL, NULL, NULL);
+INSERT plain.Decimals (Id, Whole, Mixed, Half, Fraction, Small)
+VALUES (2, 99999999999999999999999999999999999999, 9999999999999999999999999999.9999999999,
+        9999999999999999999.9999999999999999999, 0.99999999999999999999999999999999999999, 999999999999999999999999999.99);
+INSERT plain.Decimals (Id, Whole, Mixed, Half, Fraction, Small)
+VALUES (3, -99999999999999999999999999999999999999, -9999999999999999999999999999.9999999999,
+        -9999999999999999999.9999999999999999999, -0.99999999999999999999999999999999999999, -999999999999999999999999999.99);
+INSERT plain.Decimals (Id, Whole, Mixed, Half, Fraction, Small)
+VALUES (4, 1, 0.0000000001, 0.0000000000000000001, 0.00000000000000000000000000000000000001, 0.01);
+INSERT plain.Decimals (Id, Whole, Mixed, Half, Fraction, Small)
+VALUES (5, 79228162514264337593543950335, 1234567890123456789.0123456789,
+        1234567890123456789.0123456789012345678, 0.12345678901234567890123456789012345678, 1.50);
+INSERT plain.Decimals (Id, Whole, Mixed, Half, Fraction, Small)
+VALUES (6, 79228162514264337593543950336, 12345.6789000000, 0, 0, 0);
+INSERT plain.Decimals (Id, Whole, Mixed, Half, Fraction, Small)
+VALUES (7, 0, -0.5000000000, 42.5, -0.5, -12.34);
 
 -- Identity values with gaps must be preserved.
 INSERT plain.IdentityGaps (Name) VALUES ('a'), ('b'), ('c'), ('d'), ('e');
