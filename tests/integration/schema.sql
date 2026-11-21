@@ -108,3 +108,36 @@ CREATE NONCLUSTERED INDEX IX_Numbers_Stamp ON plain.Numbers (Stamp) WITH (DATA_C
 CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_Numbers ON plain.Numbers (Big, Amount, Ratio);
 CREATE SPATIAL INDEX SIX_Spatial_Geo ON plain.Spatial (Geo);
 GO
+
+/* One foreign key of every kind, for copy --foreign-keys (foreign_keys.sql compares them). */
+CREATE TABLE rt.Parent
+(
+    Id   INT     NOT NULL PRIMARY KEY,
+    Code CHAR(3) NOT NULL CONSTRAINT UQ_Parent_Code UNIQUE,
+    A    INT     NOT NULL,
+    B    INT     NOT NULL,
+    CONSTRAINT UQ_Parent_AB UNIQUE (A, B)
+);
+
+CREATE TABLE rt.Child
+(
+    Id         INT     NOT NULL CONSTRAINT PK_Child PRIMARY KEY,
+    ParentId   INT     NULL CONSTRAINT FK_Child_Parent REFERENCES rt.Parent (Id) ON DELETE CASCADE,   -- cascade delete
+    ParentCode CHAR(3) NULL CONSTRAINT FK_Child_ParentCode REFERENCES rt.Parent (Code),            -- to a unique constraint
+    A          INT     NULL,
+    B          INT     NULL,
+    ManagerId  INT     NULL CONSTRAINT FK_Child_Manager REFERENCES rt.Child (Id),                  -- self-reference
+    CONSTRAINT FK_Child_ParentAB FOREIGN KEY (A, B) REFERENCES rt.Parent (A, B) ON UPDATE CASCADE  -- two columns
+);
+
+CREATE TABLE plain.Ref
+(
+    Id           INT NOT NULL PRIMARY KEY,
+    ChildId      INT NULL REFERENCES rt.Child (Id) ON DELETE SET NULL,   -- cross-schema, system-named
+    LooseChildId INT NULL,
+    OffChildId   INT NULL
+);
+ALTER TABLE plain.Ref WITH NOCHECK ADD CONSTRAINT FK_Ref_Loose FOREIGN KEY (LooseChildId) REFERENCES rt.Child (Id);  -- not trusted
+ALTER TABLE plain.Ref ADD CONSTRAINT FK_Ref_Off FOREIGN KEY (OffChildId) REFERENCES rt.Child (Id);
+ALTER TABLE plain.Ref NOCHECK CONSTRAINT FK_Ref_Off;                                                                -- disabled
+GO

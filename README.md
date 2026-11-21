@@ -157,6 +157,7 @@ bcpjson copy --source-server PROD01 --source-database Sales `
 | `--no-table-lock` | Load without a table lock (default: locked). See [Table locking](#table-locking). |
 | `--snapshot` | Copy from a database snapshot of the source. See [Consistent point-in-time exports](#consistent-point-in-time-exports). |
 | `--no-indexes` | Don't recreate primary keys, unique constraints and indexes on the tables copy creates (default: recreated). See [Keys and indexes](#keys-and-indexes). |
+| `--foreign-keys` | Also recreate foreign keys (default: off). See [Foreign keys](#foreign-keys). |
 | `--trust-server-certificate`, `--log-file` | As for export. |
 
 Missing target tables are created from the source definition: columns, nullability, identity, defaults and computed columns, then — after the data is loaded — the primary key, unique constraints and indexes. Tables with geography, geometry or hierarchyid columns are moved with `bcp` through a temporary folder.
@@ -177,7 +178,29 @@ Use `--no-indexes` when:
 - you want the copy to finish as quickly as possible and do not need to query the result efficiently;
 - the target has little free space: building large indexes needs temporary space in the data files and `tempdb`.
 
-Foreign keys, check constraints and triggers are not copied.
+Check constraints and triggers are not copied; foreign keys are copied with `--foreign-keys`.
+
+#### Foreign keys
+
+**Default:** off. **Option:** `--foreign-keys` turns it on.
+
+With `--foreign-keys`, after **every** table has been copied and indexed, `copy` recreates the foreign keys of the tables it created: multi-column keys, keys that reference a unique constraint rather than the primary key, self-references and cross-schema references, and their `ON DELETE` / `ON UPDATE` actions. Keys that are trusted in the source are created `WITH CHECK`, so SQL Server validates the copied rows and the key is trusted in the target too; keys that are disabled or not trusted in the source are created the same way in the target. They are created one at a time, and one that fails is reported as an error (exit code 1) while the others are still created.
+
+```powershell
+# Consistent copy of a whole database, including its relationships
+bcpjson copy --source-server PROD01 --source-database Sales `
+             --target-server TEST01 --target-database Sales_Test --drop-target --snapshot --foreign-keys
+```
+
+Why it is off by default — a foreign key involves two tables, so it fails in situations that do not affect a single table:
+
+- **Partial copies.** With `--include-*` / `--exclude-*` filters, the table a key references may not be part of the copy. The key can only be created if that table already exists in the target with the referenced key.
+- **Copies of a changing database.** Without `--snapshot`, a child row can be copied without the parent row it points to, and the `WITH CHECK` validation fails. Use `--snapshot` with `--foreign-keys` (bcpJson warns if you don't).
+- **Validation time.** Checking a large table against its parent takes time; skip foreign keys for scratch copies where you don't need them.
+
+`--foreign-keys` cannot be combined with `--no-indexes`, because foreign keys need the referenced primary keys and unique constraints.
+
+**Re-running a copy:** with `--drop-target`, `copy` first removes the foreign keys defined on the tables it is about to drop and recreate (they would be dropped with their tables anyway), so a database previously copied with `--foreign-keys` can be refreshed. A foreign key on a table *outside* the copy that references a copied table is left alone; if it prevents a table from being dropped, that table is reported as an error.
 
 ## Table locking
 
@@ -317,7 +340,8 @@ Each file is a JSON array with one object per row, one row per line:
 - geography/geometry exported to JSON lose their SRID (re-imported as 4326 / 0).
 - `sql_variant` values are re-imported as `nvarchar`.
 - `copy --source-query` is not supported.
-- `copy` recreates keys and indexes but not foreign keys, check constraints or triggers, and places indexes on the target's default filegroup.
+- `copy` recreates keys and indexes (and foreign keys with `--foreign-keys`) but not check constraints or triggers, and places indexes on the target's default filegroup.
+- `import` bulk loads without checking constraints (the bcp and SqlBulkCopy default, which is what makes it fast). Foreign key and check constraints on the target tables are not validated during the load and SQL Server marks them as not trusted; run `ALTER TABLE ... WITH CHECK CHECK CONSTRAINT ALL` afterwards if you need them trusted.
 - BCP import into a table whose schema or table name contains `.` or `"` **and** that has a filtered, XML or spatial index fails (bcp cannot set `QUOTED_IDENTIFIER ON` for such names). Use JSON import for that table.
 - `-k` on export is reserved; JSON always writes NULLs.
 

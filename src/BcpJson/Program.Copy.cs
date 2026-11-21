@@ -1,6 +1,7 @@
 ﻿using Microsoft.Data.SqlClient;
 using Microsoft.SqlServer.Management.Common;
 using Microsoft.SqlServer.Management.Smo;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using Index = Microsoft.SqlServer.Management.Smo.Index;
 using System.Data;
@@ -28,11 +29,17 @@ namespace bcpJson
             int maxTasks = setting.MaxParallelTasks;
             PostToConsole(maxTasks > 0 ? string.Format("Parallel table task operations: {0}", maxTasks) : "Parallel table task operations: Unlimited", InfoLevel.Info);
 
+            if (setting.DropTarget)
+            {
+                DropForeignKeysOwnedBy(setting, tables);
+            }
+
+            var createdTables = new ConcurrentBag<TableRef>();
             Parallel.ForEach(tables, Parallelism(maxTasks), table =>
             {
                 try
                 {
-                    long copied = CopyTable(setting, table);
+                    long copied = CopyTable(setting, table, createdTables);
                     if (copied > 0)
                     {
                         Interlocked.Add(ref totalrowCount, copied);
@@ -44,10 +51,131 @@ namespace bcpJson
                 }
             });
 
+            // Foreign keys span tables, so they can only be created once every table (and its keys) exists.
+            if (setting.ForeignKeys && !createdTables.IsEmpty)
+            {
+                CreateTargetForeignKeys(setting, createdTables.OrderBy(t => t.DisplayName, StringComparer.Ordinal).ToList());
+            }
+
             return totalrowCount;
         }
 
-        private static long CopyTable(CopyOptions setting, TableRef tableRef)
+        /// <summary>
+        /// --drop-target: removes the foreign keys defined on the target tables that are about to be dropped and
+        /// recreated. They would be dropped with their tables anyway, but while they exist they can block dropping
+        /// the tables they reference (e.g. when re-running a copy made with --foreign-keys). Foreign keys on tables
+        /// outside the copy are left alone; if one of those blocks a drop, that table reports an error.
+        /// </summary>
+        private static void DropForeignKeysOwnedBy(CopyOptions setting, List<TableRef> tables)
+        {
+            const string sql = @"SELECT fk.name
+FROM sys.foreign_keys fk
+     JOIN sys.tables t ON t.object_id = fk.parent_object_id
+     JOIN sys.schemas s ON s.schema_id = t.schema_id
+WHERE s.name = @schema AND t.name = @table;";
+
+            int dropped = 0;
+            using (var conn = new SqlConnection(setting.TargetConnectionString()))
+            {
+                conn.Open();
+                foreach (TableRef table in tables)
+                {
+                    var names = new List<string>();
+                    using (var cmd = new SqlCommand(sql, conn))
+                    {
+                        cmd.Parameters.Add("@schema", SqlDbType.NVarChar, 128).Value = table.Schema;
+                        cmd.Parameters.Add("@table", SqlDbType.NVarChar, 128).Value = table.Name;
+                        using (var reader = cmd.ExecuteReader())
+                        {
+                            while (reader.Read())
+                            {
+                                names.Add(reader.GetString(0));
+                            }
+                        }
+                    }
+
+                    foreach (string name in names)
+                    {
+                        try
+                        {
+                            ExecuteSql(conn, "ALTER TABLE " + table.QuotedName + " DROP CONSTRAINT " + QuoteName(name) + ";");
+                            dropped++;
+                        }
+                        catch (Exception ex)
+                        {
+                            PostToConsole(string.Format("{0}: Could not drop foreign key {1}: {2}", table.DisplayName, name, ex.Message), InfoLevel.Error);
+                        }
+                    }
+                }
+            }
+
+            if (dropped > 0)
+            {
+                PostToConsole(string.Format("Dropped {0} foreign key(s) on target tables that will be recreated (--drop-target).", dropped));
+            }
+        }
+
+        /// <summary>
+        /// --foreign-keys: recreates the foreign keys of every table this run created, one at a time (each takes
+        /// schema locks on both tables). SMO scripts them from the source, so multi-column keys, references to
+        /// unique constraints, cross-schema references, ON DELETE/ON UPDATE actions and the enabled/trusted state
+        /// carry over; trusted keys are created WITH CHECK, which validates the copied rows. A key whose referenced
+        /// table or key is missing in the target is reported as an error and the others are still created.
+        /// </summary>
+        private static void CreateTargetForeignKeys(CopyOptions setting, List<TableRef> createdTables)
+        {
+            var scripting = new ScriptingOptions
+            {
+                DriForeignKeys = true,
+                SchemaQualifyForeignKeysReferences = true,
+                IncludeIfNotExists = false,
+                ScriptBatchTerminator = false
+            };
+
+            int total = 0;
+            int createdCount = 0;
+            string sourceConnectionString = setting.SourceConnectionString();
+            using (var sourceSql = new SqlConnection(sourceConnectionString))
+            using (var targetConn = new SqlConnection(setting.TargetConnectionString()))
+            {
+                var sourceServer = new Server(new ServerConnection(sourceSql));
+                try
+                {
+                    targetConn.Open();
+                    Database sourceDatabase = sourceServer.Databases[new SqlConnectionStringBuilder(sourceConnectionString).InitialCatalog];
+                    foreach (TableRef tableRef in createdTables)
+                    {
+                        Table sourceTable = sourceDatabase.Tables.ItemById(tableRef.ObjectId);
+                        foreach (ForeignKey foreignKey in sourceTable.ForeignKeys.Cast<ForeignKey>().OrderBy(fk => fk.Name, StringComparer.Ordinal))
+                        {
+                            total++;
+                            try
+                            {
+                                foreach (string statement in foreignKey.Script(scripting).Cast<string>())
+                                {
+                                    ExecuteSql(targetConn, statement);
+                                }
+                                createdCount++;
+                            }
+                            catch (Exception ex)
+                            {
+                                PostToConsole(string.Format("{0}: Could not create foreign key {1} (references {2}.{3}): {4}",
+                                    tableRef.DisplayName, foreignKey.Name, foreignKey.ReferencedTableSchema, foreignKey.ReferencedTable, ex.GetBaseException().Message), InfoLevel.Error);
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    sourceServer.ConnectionContext.Disconnect();
+                }
+            }
+
+            PostToConsole(string.Format("{0} of {1} foreign key(s) created.", createdCount, total),
+                createdCount == total ? InfoLevel.Success : InfoLevel.Warning);
+        }
+
+        private static long CopyTable(CopyOptions setting, TableRef tableRef, ConcurrentBag<TableRef> createdTables)
         {
             string sourceConnectionString = setting.SourceConnectionString();
             string targetConnectionString = setting.TargetConnectionString();
@@ -95,6 +223,7 @@ namespace bcpJson
                         {
                             CreateTargetIndexes(setting, sourceTable, tableRef);
                         }
+                        createdTables.Add(tableRef);
                     }
 
                     return copied;
