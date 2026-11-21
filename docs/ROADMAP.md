@@ -15,8 +15,14 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 - Fixes found by CI: Linux bcp has no `-x` (exports now write non-XML `-c.fmt`; import still accepts old `-c.xml`) and no `-o` (bcp stdout is captured in-process into the same `_output.log`).
 - Merged master (PRs #6–#12, Codex): already covered by the refactor except `--max-tasks` for export/import, which was ported via `Parallelism()`.
 
-## Done (branch `feature/copy-indexes`)
+## Releases
 
+- v2.0.0 (2026-11-20): first tagged release. v2.0.1: SqlClient 7, SMO 181, SqlServer.Types 170. **v2.1.0** (2026-11-21, `c154790`): copy recreates keys and indexes; BCP import fix below.
+
+## Done in v2.1.0 (PR #28)
+
+- **BCP import fix:** `bcp in` now runs with `-q` (QUOTED_IDENTIFIER ON); before, imports into tables with filtered/XML/spatial indexes failed. With `-q` bcp needs the table unbracketed as `schema.table` (names with `.` or `"` fall back to brackets without `-q`). Linux exports no longer leave a stray `nul` file.
+- System-named constraints (declared without a name) get a new system name in the copy; explicitly named ones keep their names.
 - `copy` recreates primary keys, unique constraints and all index kinds on tables it creates, after the load (SMO scripting without filegroups, clustered first, XML/spatial after the PK). On by default; `--no-indexes` opts out. CI adds one index of every kind to the test schema, compares index definitions source vs copy (`tests/integration/indexes.sql`) and now compares copied data exactly (same order thanks to the PKs).
 - Not copied (possible future options): foreign keys, check constraints, triggers.
 
