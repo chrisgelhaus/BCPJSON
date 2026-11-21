@@ -7,6 +7,8 @@
 #   roundtrip.sh copy    copy --snapshot -> export JSON and index definitions, diff exactly with the source;
 #                        copy --no-indexes -> no indexes, rows identical (order ignored)
 #   roundtrip.sh snapshot  export --snapshot (JSON and BCP), diff with the source export; no snapshot may be left behind
+#   roundtrip.sh consistency  export --snapshot while a writer moves value between two tables: totals must be exact;
+#                          without --snapshot the same export must drift (proves the check works)
 #
 # Table locking: JSON import and copy use the default (TABLOCK); BCP import uses --no-table-lock.
 #
@@ -193,8 +195,57 @@ case "${1:-}" in
         [ -s "$WORK/snapshot-bcp/plain.Numbers.bcp" ] || { echo "::error::Snapshot BCP export wrote no data"; exit 1; }
         ;;
 
+    consistency)
+        # --snapshot must give a single point in time while the source is being written to (see consistency.sql).
+        command -v jq >/dev/null || { echo "jq not found on PATH"; exit 1; }
+        sql -i "$HERE/consistency.sql"
+        live() { sql -d BcpJsonLive -h -1 -W -Q "SET NOCOUNT ON; $1" | tr -d '[:space:]'; }
+        transfers() { live "SELECT Transfers FROM inv.Control WHERE Id = 1;"; }
+        export_total() { jq -s '[.[0][].Value, .[1][].Value] | add' "$1/inv.A.json" "$1/inv.B.json"; }
+        expected="$(live "SELECT SUM(Value) FROM (SELECT Value FROM inv.A UNION ALL SELECT Value FROM inv.B) AS v;")"
+        echo "Invariant: SUM(inv.A.Value) + SUM(inv.B.Value) = $expected at every committed point in time."
+
+        sql -d BcpJsonLive -i "$HERE/writer.sql" > "$WORK/writer.log" 2>&1 &
+        writer=$!
+        stop_writer() { sql -d BcpJsonLive -Q "UPDATE inv.Control SET [Stop] = 1 WHERE Id = 1;" > /dev/null; wait "$writer"; }
+        trap 'stop_writer > /dev/null 2>&1 || true' EXIT
+        for _ in $(seq 1 60); do [ "$(transfers)" -gt 100 ] && break; sleep 1; done
+        echo "Writer running: $(transfers) transfers committed so far."
+
+        # 1. With --snapshot, every export adds up exactly, although transfers commit while it runs.
+        #    --max-tasks 1 reads the tables one after another, widening the gap between them.
+        for run in 1 2; do
+            before="$(transfers)"
+            export_json BcpJsonLive "$WORK/live-snapshot-$run" --include-schemas inv --max-tasks 1 --snapshot
+            after="$(transfers)"
+            total="$(export_total "$WORK/live-snapshot-$run")"
+            echo "export --snapshot #$run: total $total (expected $expected); $((after - before)) transfers committed during the export."
+            [ "$after" -gt "$before" ] || { echo "::error::No transfers were committed during the export, so it proves nothing"; exit 1; }
+            [ "$total" = "$expected" ] || { echo "::error::export --snapshot #$run is inconsistent: total $total, expected $expected"; exit 1; }
+        done
+        assert_no_snapshots
+
+        # 2. Control: the same export without --snapshot must be caught drifting, which shows the check can fail.
+        drift=""
+        for attempt in 1 2 3; do
+            if ! export_json BcpJsonLive "$WORK/live-nosnapshot-$attempt" --include-schemas inv --max-tasks 1; then
+                echo "Export without --snapshot failed (e.g. deadlock victim); retrying."
+                continue
+            fi
+            total="$(export_total "$WORK/live-nosnapshot-$attempt")"
+            echo "export without --snapshot, attempt $attempt: total $total (expected $expected)."
+            if [ "$total" != "$expected" ]; then drift="$((total - expected))"; break; fi
+        done
+        [ -n "$drift" ] || { echo "::error::Control failed: exports without --snapshot never drifted, so this test cannot detect inconsistency"; exit 1; }
+
+        trap - EXIT
+        stop_writer
+        tail -n 2 "$WORK/writer.log"
+        echo "Without --snapshot the export was off by $drift; both --snapshot exports were exact."
+        ;;
+
     *)
-        echo "usage: $0 setup|json|bcp|copy|snapshot" >&2
+        echo "usage: $0 setup|json|bcp|copy|snapshot|consistency" >&2
         exit 2
         ;;
 esac
