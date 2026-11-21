@@ -141,3 +141,41 @@ ALTER TABLE plain.Ref WITH NOCHECK ADD CONSTRAINT FK_Ref_Loose FOREIGN KEY (Loos
 ALTER TABLE plain.Ref ADD CONSTRAINT FK_Ref_Off FOREIGN KEY (OffChildId) REFERENCES rt.Child (Id);
 ALTER TABLE plain.Ref NOCHECK CONSTRAINT FK_Ref_Off;                                                                -- disabled
 GO
+
+/* One check constraint of every kind (check_constraints.sql compares them). data.sql has a row only the disabled one allows. */
+ALTER TABLE rt.Parent ADD CONSTRAINT CK_Parent_Code CHECK (Code LIKE '[A-Z][A-Z][A-Z]');
+ALTER TABLE rt.Parent ADD CHECK (A >= 0 AND B >= 0);                                                                   -- system-named
+ALTER TABLE rt.Child ADD CONSTRAINT CK_Child_AB CHECK ((A IS NULL AND B IS NULL) OR (A IS NOT NULL AND B IS NOT NULL));
+ALTER TABLE plain.Ref WITH NOCHECK ADD CONSTRAINT CK_Ref_Loose CHECK (LooseChildId > 0);                                -- not trusted
+ALTER TABLE plain.Ref ADD CONSTRAINT CK_Ref_Off CHECK (OffChildId < 50);
+ALTER TABLE plain.Ref NOCHECK CONSTRAINT CK_Ref_Off;                                                                   -- disabled
+GO
+
+/* Triggers (triggers.sql compares them). rt.ChildAudit is filled by TR_Child_Audit when data.sql inserts rt.Child, and is
+   copied as data: if any trigger fired during a copy or import, the audit table would gain rows and the data diff fails. */
+CREATE TABLE rt.ChildAudit
+(
+    Id      INT     IDENTITY(1, 1) NOT NULL PRIMARY KEY,
+    ChildId INT     NOT NULL,
+    Action  CHAR(1) NOT NULL
+);
+GO
+CREATE TRIGGER rt.TR_Child_Audit ON rt.Child AFTER INSERT, UPDATE
+AS
+BEGIN
+    SET NOCOUNT ON;
+    INSERT rt.ChildAudit (ChildId, Action)
+    SELECT Id, CASE WHEN EXISTS (SELECT 1 FROM deleted) THEN 'U' ELSE 'I' END FROM inserted;
+END;
+GO
+CREATE TRIGGER rt.TR_Child_Second ON rt.Child AFTER INSERT AS SET NOCOUNT ON;
+GO
+EXEC sp_settriggerorder @triggername = N'rt.TR_Child_Audit', @order = N'First', @stmttype = N'INSERT';
+EXEC sp_settriggerorder @triggername = N'rt.TR_Child_Second', @order = N'Last', @stmttype = N'INSERT';
+GO
+CREATE TRIGGER rt.TR_Child_Disabled ON rt.Child AFTER DELETE AS SET NOCOUNT ON;
+GO
+DISABLE TRIGGER rt.TR_Child_Disabled ON rt.Child;
+GO
+CREATE TRIGGER rt.TR_Empty_InsteadOfDelete ON rt.Empty INSTEAD OF DELETE AS SET NOCOUNT ON;
+GO

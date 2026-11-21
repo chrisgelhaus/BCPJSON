@@ -108,6 +108,18 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Check_constraints_default_on_triggers_opt_in()
+        {
+            var defaults = Parsed<CopyOptions>("copy");
+            Assert.False(defaults.NoCheckConstraints);
+            Assert.False(defaults.Triggers);
+
+            var set = Parsed<CopyOptions>("copy", "--no-check-constraints", "--triggers");
+            Assert.True(set.NoCheckConstraints);
+            Assert.True(set.Triggers);
+        }
+
+        [Fact]
         public void Foreign_keys_cannot_be_combined_with_no_indexes()
         {
             // Rejected before any connection is attempted.

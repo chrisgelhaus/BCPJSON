@@ -4,6 +4,7 @@ using Microsoft.SqlServer.Management.Smo;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using Index = Microsoft.SqlServer.Management.Smo.Index;
+using ActivationOrder = Microsoft.SqlServer.Management.Smo.Agent.ActivationOrder;
 using System.Data;
 using System.IO;
 using System.Linq;
@@ -55,6 +56,12 @@ namespace bcpJson
             if (setting.ForeignKeys && !createdTables.IsEmpty)
             {
                 CreateTargetForeignKeys(setting, createdTables.OrderBy(t => t.DisplayName, StringComparer.Ordinal).ToList());
+            }
+
+            // Triggers last: created after every load, they never fire on the copied rows.
+            if (setting.Triggers && !createdTables.IsEmpty)
+            {
+                CreateTargetTriggers(setting, createdTables.OrderBy(t => t.DisplayName, StringComparer.Ordinal).ToList());
             }
 
             return totalrowCount;
@@ -175,6 +182,137 @@ WHERE s.name = @schema AND t.name = @table;";
                 createdCount == total ? InfoLevel.Success : InfoLevel.Warning);
         }
 
+        /// <summary>
+        /// Recreates the source table's check constraints on the newly created target table, after the load.
+        /// Trusted constraints are created WITH CHECK (validating the copied rows, which already satisfied them in
+        /// the source); disabled or untrusted ones keep that state. A constraint that cannot be created (for example
+        /// one that calls a function missing in the target) is reported as an error and the others are still created.
+        /// </summary>
+        private static void CreateTargetCheckConstraints(CopyOptions setting, Table sourceTable, TableRef tableRef)
+        {
+            List<Check> checks = sourceTable.Checks.Cast<Check>().OrderBy(c => c.Name, StringComparer.Ordinal).ToList();
+            if (checks.Count == 0)
+            {
+                return;
+            }
+
+            var scripting = new ScriptingOptions
+            {
+                DriChecks = true,
+                IncludeIfNotExists = false,
+                ScriptBatchTerminator = false
+            };
+
+            int createdCount = 0;
+            using (var conn = new SqlConnection(setting.TargetConnectionString()))
+            {
+                conn.Open();
+                foreach (Check check in checks)
+                {
+                    try
+                    {
+                        foreach (string statement in check.Script(scripting).Cast<string>())
+                        {
+                            ExecuteSql(conn, statement);
+                        }
+                        createdCount++;
+                    }
+                    catch (Exception ex)
+                    {
+                        PostToConsole(string.Format("{0}: Could not create check constraint {1}: {2}", tableRef.DisplayName, check.Name, ex.GetBaseException().Message), InfoLevel.Error);
+                    }
+                }
+            }
+
+            PostToConsole(string.Format("{0}: {1} of {2} check constraint(s) created.", tableRef.DisplayName, createdCount, checks.Count),
+                createdCount == checks.Count ? InfoLevel.Info : InfoLevel.Warning);
+        }
+
+        /// <summary>
+        /// --triggers: recreates the DML triggers of every table this run created, after all tables are loaded so
+        /// they never fire on the copied rows. Each trigger is scripted by SMO with its definition; the enabled state
+        /// and FIRST/LAST firing order are then applied explicitly. Encrypted triggers cannot be scripted, and
+        /// triggers referencing objects missing in the target fail; both are reported as errors.
+        /// </summary>
+        private static void CreateTargetTriggers(CopyOptions setting, List<TableRef> createdTables)
+        {
+            var scripting = new ScriptingOptions
+            {
+                IncludeIfNotExists = false,
+                ScriptBatchTerminator = false
+            };
+
+            int total = 0;
+            int createdCount = 0;
+            string sourceConnectionString = setting.SourceConnectionString();
+            using (var sourceSql = new SqlConnection(sourceConnectionString))
+            using (var targetConn = new SqlConnection(setting.TargetConnectionString()))
+            {
+                var sourceServer = new Server(new ServerConnection(sourceSql));
+                try
+                {
+                    targetConn.Open();
+                    Database sourceDatabase = sourceServer.Databases[new SqlConnectionStringBuilder(sourceConnectionString).InitialCatalog];
+                    foreach (TableRef tableRef in createdTables)
+                    {
+                        Table sourceTable = sourceDatabase.Tables.ItemById(tableRef.ObjectId);
+                        foreach (Trigger trigger in sourceTable.Triggers.Cast<Trigger>().OrderBy(t => t.Name, StringComparer.Ordinal))
+                        {
+                            total++;
+                            string quotedTrigger = QuoteName(tableRef.Schema) + "." + QuoteName(trigger.Name);
+                            try
+                            {
+                                if (trigger.IsEncrypted)
+                                {
+                                    throw new InvalidOperationException("the trigger is encrypted (WITH ENCRYPTION), so its definition cannot be copied.");
+                                }
+
+                                foreach (string statement in trigger.Script(scripting).Cast<string>())
+                                {
+                                    ExecuteSql(targetConn, statement);
+                                }
+
+                                foreach (string orderSql in TriggerOrderStatements(quotedTrigger, trigger.InsertOrder, trigger.UpdateOrder, trigger.DeleteOrder))
+                                {
+                                    ExecuteSql(targetConn, orderSql);
+                                }
+
+                                if (!trigger.IsEnabled)
+                                {
+                                    ExecuteSql(targetConn, "DISABLE TRIGGER " + quotedTrigger + " ON " + tableRef.QuotedName + ";");
+                                }
+                                createdCount++;
+                            }
+                            catch (Exception ex)
+                            {
+                                PostToConsole(string.Format("{0}: Could not create trigger {1}: {2}", tableRef.DisplayName, trigger.Name, ex.GetBaseException().Message), InfoLevel.Error);
+                            }
+                        }
+                    }
+                }
+                finally
+                {
+                    sourceServer.ConnectionContext.Disconnect();
+                }
+            }
+
+            PostToConsole(string.Format("{0} of {1} trigger(s) created.", createdCount, total),
+                createdCount == total ? InfoLevel.Success : InfoLevel.Warning);
+        }
+
+        /// <summary>sp_settriggerorder calls for the statement types whose firing order is First or Last.</summary>
+        internal static IEnumerable<string> TriggerOrderStatements(string quotedTrigger, ActivationOrder insertOrder, ActivationOrder updateOrder, ActivationOrder deleteOrder)
+        {
+            foreach (var (statementType, order) in new[] { ("INSERT", insertOrder), ("UPDATE", updateOrder), ("DELETE", deleteOrder) })
+            {
+                if (order == ActivationOrder.First || order == ActivationOrder.Last)
+                {
+                    yield return string.Format("EXEC sp_settriggerorder @triggername = {0}, @order = N'{1}', @stmttype = N'{2}';",
+                        SqlLiteral(quotedTrigger), order, statementType);
+                }
+            }
+        }
+
         private static long CopyTable(CopyOptions setting, TableRef tableRef, ConcurrentBag<TableRef> createdTables)
         {
             string sourceConnectionString = setting.SourceConnectionString();
@@ -222,6 +360,18 @@ WHERE s.name = @schema AND t.name = @table;";
                         else
                         {
                             CreateTargetIndexes(setting, sourceTable, tableRef);
+                        }
+
+                        if (setting.NoCheckConstraints)
+                        {
+                            if (sourceTable.Checks.Count > 0)
+                            {
+                                PostToConsole(string.Format("{0}: Check constraints not created (--no-check-constraints).", tableRef.DisplayName));
+                            }
+                        }
+                        else
+                        {
+                            CreateTargetCheckConstraints(setting, sourceTable, tableRef);
                         }
                         createdTables.Add(tableRef);
                     }

@@ -18,11 +18,12 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 ## Done after v2.1.0
 
 - Snapshot consistency test (`roundtrip.sh consistency`, CI step "Snapshot consistency under concurrent writes"): a writer (`writer.sql`) moves value between `inv.A` and `inv.B` in `BcpJsonLive` (`consistency.sql`); `export --snapshot` must add up exactly while transfers commit, and an export without `--snapshot` must drift (control).
-- `copy --foreign-keys` (opt-in): after all tables are copied, recreates the FKs of created tables with SMO (WITH CHECK when trusted in the source; disabled/untrusted state mirrored), one at a time. `--drop-target` first drops FKs owned by the tables being recreated, so re-runs work. Rejected with `--no-indexes`; warns without `--snapshot`. CI: one FK of every kind in the test schema, FK definitions compared (`foreign_keys.sql`), plus a `--drop-target` re-run.
+- `copy --foreign-keys` (opt-in): after all tables are copied, recreates the FKs of created tables with SMO (WITH CHECK when trusted in the source; disabled/untrusted state mirrored), one at a time. `--drop-target` first drops FKs owned by the tables being recreated, so re-runs work. Rejected with `--no-indexes`; warns without `--snapshot`. CI: one FK of every kind in the test schema, FK definitions compared (`foreign_keys.sql`), plus a `--drop-target` re-run. Released in v2.2.0.
+- Check constraints (default on, `--no-check-constraints`) and triggers (opt-in `--triggers`, created last so they never fire on copied rows; enabled state and FIRST/LAST order applied explicitly). CI: one of each kind in the schema, definitions compared via `check_constraints.sql` / `triggers.sql` (generic `compare_definitions` in roundtrip.sh), and `rt.ChildAudit` proves no trigger fired during copy or import.
 
 ## Releases
 
-- v2.0.0 (2026-11-20): first tagged release. v2.0.1: SqlClient 7, SMO 181, SqlServer.Types 170. **v2.1.0** (2026-11-21, `c154790`): copy recreates keys and indexes; BCP import fix below.
+- v2.0.0 (2026-11-20): first tagged release. v2.0.1: SqlClient 7, SMO 181, SqlServer.Types 170. **v2.1.0** (2026-11-21, `c154790`): copy recreates keys and indexes; BCP import fix below. **v2.2.0** (`0a172f5`): `copy --foreign-keys`, snapshot consistency test.
 
 ## Done in v2.1.0 (PR #28)
 

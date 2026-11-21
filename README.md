@@ -158,6 +158,8 @@ bcpjson copy --source-server PROD01 --source-database Sales `
 | `--snapshot` | Copy from a database snapshot of the source. See [Consistent point-in-time exports](#consistent-point-in-time-exports). |
 | `--no-indexes` | Don't recreate primary keys, unique constraints and indexes on the tables copy creates (default: recreated). See [Keys and indexes](#keys-and-indexes). |
 | `--foreign-keys` | Also recreate foreign keys (default: off). See [Foreign keys](#foreign-keys). |
+| `--no-check-constraints` | Don't recreate check constraints (default: recreated). See [Check constraints](#check-constraints). |
+| `--triggers` | Also recreate triggers (default: off). See [Triggers](#triggers). |
 | `--trust-server-certificate`, `--log-file` | As for export. |
 
 Missing target tables are created from the source definition: columns, nullability, identity, defaults and computed columns, then — after the data is loaded — the primary key, unique constraints and indexes. Tables with geography, geometry or hierarchyid columns are moved with `bcp` through a temporary folder.
@@ -178,7 +180,7 @@ Use `--no-indexes` when:
 - you want the copy to finish as quickly as possible and do not need to query the result efficiently;
 - the target has little free space: building large indexes needs temporary space in the data files and `tempdb`.
 
-Check constraints and triggers are not copied; foreign keys are copied with `--foreign-keys`.
+Check constraints are recreated too ([Check constraints](#check-constraints)); foreign keys and triggers are copied on request ([Foreign keys](#foreign-keys), [Triggers](#triggers)).
 
 #### Foreign keys
 
@@ -201,6 +203,33 @@ Why it is off by default — a foreign key involves two tables, so it fails in s
 `--foreign-keys` cannot be combined with `--no-indexes`, because foreign keys need the referenced primary keys and unique constraints.
 
 **Re-running a copy:** with `--drop-target`, `copy` first removes the foreign keys defined on the tables it is about to drop and recreate (they would be dropped with their tables anyway), so a database previously copied with `--foreign-keys` can be refreshed. A foreign key on a table *outside* the copy that references a copied table is left alone; if it prevents a table from being dropped, that table is reported as an error.
+
+#### Check constraints
+
+**Default:** on. **Option:** `--no-check-constraints` turns it off.
+
+On every table it creates, `copy` recreates the source's check constraints right after the table's indexes. A check constraint only involves its own table, and the copied rows already satisfied it in the source, so trusted constraints are created `WITH CHECK` (validated and trusted in the target); disabled or untrusted ones keep that state. Names are kept, except that constraints declared without a name get a new system name. A constraint that cannot be created — typically one that calls a user-defined function that does not exist in the target — is reported as an error and the others are still created.
+
+Use `--no-check-constraints` when the target is a staging area that must accept rows the source would reject, or to save the validation scan on very large tables.
+
+#### Triggers
+
+**Default:** off. **Option:** `--triggers` turns it on.
+
+With `--triggers`, `copy` recreates the DML triggers (`AFTER` and `INSTEAD OF`) of the tables it created, **after all tables are loaded**, so they never fire on the copied rows. Each trigger's definition is copied as is; disabled triggers stay disabled and the `FIRST` / `LAST` firing order set with `sp_settriggerorder` is kept.
+
+```powershell
+# Full copy of the schema objects bcpJson handles: keys, indexes, check constraints, foreign keys and triggers
+bcpjson copy --source-database Sales --target-database Sales_Test --drop-target --snapshot --foreign-keys --triggers
+```
+
+Why it is off by default:
+
+- **Triggers run on every later write.** In a copy, an audit trigger keeps writing audit rows, and a trigger that sends mail, calls a procedure or writes to another database keeps doing so — often not wanted in a test or reporting copy.
+- **Triggers reference other objects.** Procedures, functions, other tables or databases used by the trigger must exist in the target, or creating (or later firing) the trigger fails.
+- **Encrypted triggers** (`WITH ENCRYPTION`) cannot be scripted and are reported as errors; CLR triggers need their assembly in the target.
+
+Each trigger that cannot be created is reported as an error and the others are still created. Database-level (DDL) triggers are not copied.
 
 ## Table locking
 
@@ -340,7 +369,7 @@ Each file is a JSON array with one object per row, one row per line:
 - geography/geometry exported to JSON lose their SRID (re-imported as 4326 / 0).
 - `sql_variant` values are re-imported as `nvarchar`.
 - `copy --source-query` is not supported.
-- `copy` recreates keys and indexes (and foreign keys with `--foreign-keys`) but not check constraints or triggers, and places indexes on the target's default filegroup.
+- `copy` recreates keys, indexes and check constraints (and foreign keys and triggers on request), but not other objects such as views, procedures, functions or DDL triggers; indexes are placed on the target's default filegroup.
 - `import` bulk loads without checking constraints (the bcp and SqlBulkCopy default, which is what makes it fast). Foreign key and check constraints on the target tables are not validated during the load and SQL Server marks them as not trusted; run `ALTER TABLE ... WITH CHECK CHECK CONSTRAINT ALL` afterwards if you need them trusted.
 - BCP import into a table whose schema or table name contains `.` or `"` **and** that has a filtered, XML or spatial index fails (bcp cannot set `QUOTED_IDENTIFIER ON` for such names). Use JSON import for that table.
 - `-k` on export is reserved; JSON always writes NULLs.

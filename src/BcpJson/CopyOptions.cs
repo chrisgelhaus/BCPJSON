@@ -72,6 +72,12 @@ namespace bcpJson
         [Option("foreign-keys", Default = false, Required = false, HelpText = "Also recreate the foreign keys of the tables copy creates, after all tables are loaded. Trusted keys are created WITH CHECK, which validates the copied rows: combine with --snapshot so parent and child tables are copied from the same point in time, and make sure referenced tables are part of the copy (or already exist in the target).")]
         public bool ForeignKeys { get; set; }
 
+        [Option("no-check-constraints", Default = false, Required = false, HelpText = "Do not recreate the source's check constraints on target tables that copy creates. By default they are created after the data is loaded (trusted ones WITH CHECK).")]
+        public bool NoCheckConstraints { get; set; }
+
+        [Option("triggers", Default = false, Required = false, HelpText = "Also recreate the DML triggers of the tables copy creates, after all tables are loaded (so they do not fire on the copied rows). Off by default because triggers run on every later write in the target and may reference objects that do not exist there.")]
+        public bool Triggers { get; set; }
+
         [Option("snapshot", Default = false, Required = false, HelpText = "Copy from a database snapshot of the source so every table reflects the same point in time. Needs CREATE DATABASE permission and SQL Server 2016 SP1+ (any edition); the snapshot is dropped afterwards.")]
         public bool Snapshot { get; set; }
 
