@@ -32,7 +32,7 @@ dotnet publish src/BcpJson -c Release -r win-x64 -o publish  # self-contained si
 |---|---|---|---|
 | `export` | `ExportOptions.cs` | `ExportData` → `ExportToBCP` / `ExportToJSON` / `ExportQueryTo*` | `--file-format bcp\|json`, table/schema include/exclude filters (`*` wildcards; no include filter = all user tables), `--source-query` + `--output-name`, `--nolock` |
 | `import` | `ImportOptions.cs` | `ImportData` → `ImportFromBCP` / `ImportFromJSON` | Target table must exist. JSON import streams with `JsonTextReader` + `SqlBulkCopy`; CLR-type columns go through a `#bcpjson_stage` temp table and `::Parse()`. BCP import uses the `<schema>.<table>-c.fmt` format file (falls back to legacy `-c.xml`) with `-E -k` plus `-q` (QUOTED_IDENTIFIER ON, required for tables with filtered/XML/spatial indexes) via `BcpInArguments`: with `-q` bcp needs the name unbracketed as `schema.table`, table first and direction second. |
-| `copy` | `CopyOptions.cs` | `CopyData` → `BulkCopyTables` → `CopyTable` | SMO creates/drops/truncates the target, `SqlBulkCopy` moves data; tables with geography/geometry/hierarchyid fall back to bcp export+import via a temp folder. On tables it created, `CreateTargetIndexes` then scripts every source index with SMO (`NoFileGroup`) in `IndexCreationRank` order; `--no-indexes` skips it. |
+| `copy` | `CopyOptions.cs` | `CopyData` → `BulkCopyTables` → `CopyTable` | SMO creates/drops/truncates the target, `SqlBulkCopy` moves data; tables with geography/geometry/hierarchyid fall back to bcp export+import via a temp folder. On tables it created, `CreateTargetIndexes` then scripts every source index with SMO (`NoFileGroup`) in `IndexCreationRank` order; `--no-indexes` skips it. With `--foreign-keys`, `CreateTargetForeignKeys` scripts the FKs of all created tables after the parallel loop, one at a time; `--drop-target` first runs `DropForeignKeysOwnedBy` so re-runs aren't blocked. |
 
 All verbs share `--trust-server-certificate`, `--log-file` and `--max-tasks` (via `Parallelism()`). Loads (JSON/BCP import, copy) use TABLOCK by default through `LoadOptions()` / `BcpLoadHints()`; `--no-table-lock` turns it off. `export` and `copy` take `--snapshot`: `CreateSnapshot()` makes a database snapshot, `srcDatabase` is swapped to it (so connection strings, bcp args and SMO all follow), and it is dropped in a `finally`. `Main` returns exit code 1 if any `InfoLevel.Error` message was posted.
 
@@ -68,7 +68,8 @@ All verbs share `--trust-server-certificate`, `--log-file` and `--max-tasks` (vi
 - BCP char format with `|` delimiter can't round-trip data containing `|` or newlines; `bcp out` output is unordered.
 - JSON loses geography/geometry SRID; `sql_variant` re-imports as nvarchar.
 - `copy --source-query` and export `-k` are accepted but not implemented.
-- `copy` recreates keys and indexes (after the load) but not foreign keys, check constraints or triggers; indexes land on the target's default filegroup.
+- `copy` recreates keys and indexes (after the load) and, with `--foreign-keys`, foreign keys; not check constraints or triggers. Indexes land on the target's default filegroup.
+- Imports don't check constraints during the bulk load, so target FKs/check constraints become untrusted.
 - Linux bcp lacks `-x` and `-o`; don't reintroduce them (use non-XML format files and `ExecuteProcess(..., outputLogFile)`).
 
 ## Conventions

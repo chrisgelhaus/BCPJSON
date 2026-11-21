@@ -83,4 +83,10 @@ VALUES (1, NULL, NULL, NULL),
        (2, geography::STGeomFromText('POINT(-122.35 47.65)', 4326), geometry::STGeomFromText('POINT(1 2)', 0), hierarchyid::Parse('/')),
        (3, geography::STGeomFromText('LINESTRING(-122.36 47.656, -122.343 47.656)', 4326),
            geometry::STGeomFromText('POLYGON((0 0, 3 0, 3 3, 0 3, 0 0))', 0), hierarchyid::Parse('/1/2.5/3/'));
+
+-- Foreign keys: valid references, plus an orphan (99) that only the disabled FK_Ref_Off allows.
+INSERT rt.Parent (Id, Code, A, B) VALUES (1, 'AAA', 1, 1), (2, 'BBB', 1, 2), (3, 'CCC', 2, 1);
+INSERT rt.Child (Id, ParentId, ParentCode, A, B, ManagerId)
+VALUES (1, 1, 'AAA', 1, 1, NULL), (2, 2, 'BBB', 1, 2, 1), (3, NULL, NULL, NULL, NULL, 2), (4, 3, 'CCC', 2, 1, 1);
+INSERT plain.Ref (Id, ChildId, LooseChildId, OffChildId) VALUES (1, 1, 2, 99), (2, NULL, NULL, NULL), (3, 4, 4, 3);
 GO

@@ -18,6 +18,7 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 ## Done after v2.1.0
 
 - Snapshot consistency test (`roundtrip.sh consistency`, CI step "Snapshot consistency under concurrent writes"): a writer (`writer.sql`) moves value between `inv.A` and `inv.B` in `BcpJsonLive` (`consistency.sql`); `export --snapshot` must add up exactly while transfers commit, and an export without `--snapshot` must drift (control).
+- `copy --foreign-keys` (opt-in): after all tables are copied, recreates the FKs of created tables with SMO (WITH CHECK when trusted in the source; disabled/untrusted state mirrored), one at a time. `--drop-target` first drops FKs owned by the tables being recreated, so re-runs work. Rejected with `--no-indexes`; warns without `--snapshot`. CI: one FK of every kind in the test schema, FK definitions compared (`foreign_keys.sql`), plus a `--drop-target` re-run.
 
 ## Releases
 

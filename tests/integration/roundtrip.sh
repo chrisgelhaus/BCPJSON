@@ -4,7 +4,8 @@
 #   roundtrip.sh setup   create BcpJsonSource (schema + data) and the empty target databases
 #   roundtrip.sh json    export JSON -> import JSON -> export JSON, diff with the source export
 #   roundtrip.sh bcp     export BCP  -> import BCP  -> export JSON, diff with the source export (schema "plain")
-#   roundtrip.sh copy    copy --snapshot -> export JSON and index definitions, diff exactly with the source;
+#   roundtrip.sh copy    copy --snapshot --foreign-keys -> export JSON, index and foreign key definitions, diff exactly;
+#                        rerun with --drop-target;
 #                        copy --no-indexes -> no indexes, rows identical (order ignored)
 #   roundtrip.sh snapshot  export --snapshot (JSON and BCP), diff with the source export; no snapshot may be left behind
 #   roundtrip.sh consistency  export --snapshot while a writer moves value between two tables: totals must be exact;
@@ -118,6 +119,14 @@ index_definitions() {
         --output-name indexes --source-query "$(cat "$HERE/indexes.sql")"
 }
 
+# Writes one JSON line per foreign key of a database (see foreign_keys.sql).
+foreign_key_definitions() {
+    local db="$1" dir="$2"
+    rm -rf "$dir"
+    bcpjson export "${SOURCE[@]}" --source-database "$db" --file-format json --export-path "$dir" \
+        --output-name foreign_keys --source-query "$(cat "$HERE/foreign_keys.sql")"
+}
+
 create_target_db() {
     local db="$1"
     sql -Q "IF DB_ID(N'$db') IS NOT NULL BEGIN ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db]; END"
@@ -140,6 +149,8 @@ case "${1:-}" in
     json)
         create_target_db BcpJsonJson
         bcpjson import "${TARGET[@]}" --target-database BcpJsonJson --file-format json --max-tasks 2 --source-path "$WORK/source-json" --source-file '*.json'
+        # Documented behaviour: bulk loads don't check constraints, so SQL Server marks the target's foreign keys untrusted.
+        echo "After import: $(sql -d BcpJsonJson -h -1 -W -Q "SET NOCOUNT ON; SELECT CONCAT(SUM(CAST(is_not_trusted AS INT)), ' of ', COUNT(*)) FROM sys.foreign_keys;" | tr -d '\r') foreign keys are not trusted."
         export_json BcpJsonJson "$WORK/json-roundtrip"
         compare_exact "$WORK/source-json" "$WORK/json-roundtrip"
         ;;
@@ -160,25 +171,36 @@ case "${1:-}" in
 
     copy)
         create_empty_db BcpJsonCopy
-        # Copies from a point-in-time snapshot, with the default table lock (including the bcp fallback for CLR types)
-        # and the default index recreation.
-        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonCopy --snapshot
+        # Copies from a point-in-time snapshot, with the default table lock (including the bcp fallback for CLR types),
+        # the default index recreation and --foreign-keys.
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonCopy --snapshot --foreign-keys
         assert_no_snapshots
         export_json BcpJsonCopy "$WORK/copy-roundtrip"
         # Primary keys are recreated, so the copy exports in the same order as the source: compare exactly.
         compare_exact "$WORK/source-json" "$WORK/copy-roundtrip"
-        # Every primary key, unique constraint and index must match the source definition.
+        # Every primary key, unique constraint, index and foreign key must match the source definition.
         index_definitions BcpJsonSource "$WORK/indexes-source"
         index_definitions BcpJsonCopy "$WORK/indexes-copy"
         echo "Source has $(grep -c '"index"' "$WORK/indexes-source/indexes.json") primary keys/constraints/indexes."
         compare_exact "$WORK/indexes-source" "$WORK/indexes-copy"
+        foreign_key_definitions BcpJsonSource "$WORK/fks-source"
+        foreign_key_definitions BcpJsonCopy "$WORK/fks-copy"
+        echo "Source has $(grep -c '"foreign_key"' "$WORK/fks-source/foreign_keys.json") foreign keys."
+        compare_exact "$WORK/fks-source" "$WORK/fks-copy"
 
-        # --no-indexes: tables are created without any key or index.
+        # Re-running into the same database with --drop-target must work although the tables now reference each other.
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonCopy --snapshot --foreign-keys --drop-target
+        export_json BcpJsonCopy "$WORK/copy-rerun"
+        compare_exact "$WORK/source-json" "$WORK/copy-rerun"
+        foreign_key_definitions BcpJsonCopy "$WORK/fks-rerun"
+        compare_exact "$WORK/fks-source" "$WORK/fks-rerun"
+
+        # --no-indexes (without --foreign-keys): tables are created without any key, index or foreign key.
         create_empty_db BcpJsonCopyNoIdx
         bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonCopyNoIdx --no-indexes
-        left="$(sql -d BcpJsonCopyNoIdx -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.indexes i JOIN sys.tables t ON t.object_id = i.object_id WHERE i.type > 0 AND t.is_ms_shipped = 0;" | tr -d '[:space:]')"
-        [ "$left" = "0" ] || { echo "::error::--no-indexes still created $left indexes"; exit 1; }
-        echo "--no-indexes: no indexes created."
+        left="$(sql -d BcpJsonCopyNoIdx -h -1 -W -Q "SET NOCOUNT ON; SELECT (SELECT COUNT(*) FROM sys.indexes i JOIN sys.tables t ON t.object_id = i.object_id WHERE i.type > 0 AND t.is_ms_shipped = 0) + (SELECT COUNT(*) FROM sys.foreign_keys);" | tr -d '[:space:]')"
+        [ "$left" = "0" ] || { echo "::error::--no-indexes still created $left indexes or foreign keys"; exit 1; }
+        echo "--no-indexes: no indexes or foreign keys created."
         export_json BcpJsonCopyNoIdx "$WORK/copy-noidx"
         compare_unordered "$WORK/source-json" "$WORK/copy-noidx"
         ;;

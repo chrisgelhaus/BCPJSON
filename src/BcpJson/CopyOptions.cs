@@ -69,6 +69,9 @@ namespace bcpJson
         [Option("no-indexes", Default = false, Required = false, HelpText = "Do not recreate the source's primary keys, unique constraints and indexes on target tables that copy creates. By default they are built after the data is loaded. Tables that already exist keep their own indexes either way.")]
         public bool NoIndexes { get; set; }
 
+        [Option("foreign-keys", Default = false, Required = false, HelpText = "Also recreate the foreign keys of the tables copy creates, after all tables are loaded. Trusted keys are created WITH CHECK, which validates the copied rows: combine with --snapshot so parent and child tables are copied from the same point in time, and make sure referenced tables are part of the copy (or already exist in the target).")]
+        public bool ForeignKeys { get; set; }
+
         [Option("snapshot", Default = false, Required = false, HelpText = "Copy from a database snapshot of the source so every table reflects the same point in time. Needs CREATE DATABASE permission and SQL Server 2016 SP1+ (any edition); the snapshot is dropped afterwards.")]
         public bool Snapshot { get; set; }
 
@@ -93,6 +96,17 @@ namespace bcpJson
             {
                 Program.PostToConsole("Specify both --source-database and --target-database.", Program.InfoLevel.Error);
                 return false;
+            }
+
+            if (this.ForeignKeys && this.NoIndexes)
+            {
+                Program.PostToConsole("--foreign-keys cannot be combined with --no-indexes: foreign keys need the primary keys and unique constraints that --no-indexes skips.", Program.InfoLevel.Error);
+                return false;
+            }
+
+            if (this.ForeignKeys && !this.Snapshot)
+            {
+                Program.PostToConsole("--foreign-keys without --snapshot: if the source changes during the copy, a child row can be copied without its parent and the foreign key check will fail. Consider adding --snapshot.", Program.InfoLevel.Warning);
             }
 
             if (!string.IsNullOrEmpty(this.Query))

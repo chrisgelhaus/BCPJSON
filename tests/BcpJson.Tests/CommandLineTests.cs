@@ -100,6 +100,21 @@ namespace bcpJson.Tests
             Assert.False(Parsed<ExportOptions>("export").Snapshot);
         }
 
+        [Fact]
+        public void Foreign_keys_are_opt_in()
+        {
+            Assert.False(Parsed<CopyOptions>("copy").ForeignKeys);
+            Assert.True(Parsed<CopyOptions>("copy", "--foreign-keys").ForeignKeys);
+        }
+
+        [Fact]
+        public void Foreign_keys_cannot_be_combined_with_no_indexes()
+        {
+            // Rejected before any connection is attempted.
+            var opts = Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b", "--foreign-keys", "--no-indexes");
+            Assert.False(opts.Valid());
+        }
+
         [Theory]
         [InlineData(0, "--version")]
         [InlineData(0, "--help")]
