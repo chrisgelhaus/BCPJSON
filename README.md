@@ -167,7 +167,7 @@ Missing target tables are created from the source definition: columns, nullabili
 
 When `copy` creates a target table (it did not exist, or `--drop-target` dropped it), it recreates every primary key, unique constraint and index of the source table: clustered and nonclustered, unique and filtered indexes, included columns, descending keys, data compression, columnstore, XML and spatial indexes. They are built **after the data is loaded**, because bulk loading into a table without indexes (with the default table lock) is the fastest way to load, and building each index once at the end is much cheaper than maintaining it row by row. The clustered index is built first, then the others in dependency order.
 
-Indexes are created on the target database's default filegroup: filegroup and partition-scheme placement is not copied, because the target may not have the same filegroups. An index that cannot be created is reported as an error (exit code 1) and the remaining indexes are still created.
+Indexes are created on the target database's default filegroup: filegroup and partition-scheme placement is not copied, because the target may not have the same filegroups. Index and constraint names are kept, except for constraints that were declared without a name (such as `PRIMARY KEY` on a column): SQL Server named those itself (`PK__Orders__3214EC07…`), and the copy gets its own system-generated name, just as running the original `CREATE TABLE` would. An index that cannot be created is reported as an error (exit code 1) and the remaining indexes are still created.
 
 A target table that **already exists** keeps its own indexes; `copy` does not add, change or remove them.
 

@@ -6,7 +6,11 @@
 */
 SET NOCOUNT ON;
 SELECT s.name COLLATE DATABASE_DEFAULT + N'.' + t.name COLLATE DATABASE_DEFAULT
-       + N' | ' + i.name COLLATE DATABASE_DEFAULT
+       -- Constraints declared without a name get a random system name (PK__Table__3214EC07...); a copy gets its own.
+       + N' | ' + CASE WHEN EXISTS (SELECT 1 FROM sys.key_constraints kc
+                                    WHERE kc.parent_object_id = i.object_id AND kc.unique_index_id = i.index_id AND kc.is_system_named = 1)
+                       THEN N'<system-named>'
+                       ELSE i.name COLLATE DATABASE_DEFAULT END
        + N' | ' + i.type_desc COLLATE DATABASE_DEFAULT
        + N' | unique=' + CAST(i.is_unique AS NVARCHAR(1))
        + N' pk=' + CAST(i.is_primary_key AS NVARCHAR(1))
