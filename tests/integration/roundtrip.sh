@@ -4,7 +4,8 @@
 #   roundtrip.sh setup   create BcpJsonSource (schema + data) and the empty target databases
 #   roundtrip.sh json    export JSON -> import JSON -> export JSON, diff with the source export
 #   roundtrip.sh bcp     export BCP  -> import BCP  -> export JSON, diff with the source export (schema "plain")
-#   roundtrip.sh copy    copy --snapshot (SMO + SqlBulkCopy) -> export JSON, diff with the source export (row order ignored)
+#   roundtrip.sh copy    copy --snapshot -> export JSON and index definitions, diff exactly with the source;
+#                        copy --no-indexes -> no indexes, rows identical (order ignored)
 #   roundtrip.sh snapshot  export --snapshot (JSON and BCP), diff with the source export; no snapshot may be left behind
 #
 # Table locking: JSON import and copy use the default (TABLOCK); BCP import uses --no-table-lock.
@@ -27,7 +28,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 export SQLCMDPASSWORD="$SQL_PASSWORD"
 
 sql() {
-    sqlcmd -S "$SQL_SERVER" -U "$SQL_USER" -C -b -f 65001 "$@"
+    # -I: QUOTED_IDENTIFIER ON (sqlcmd defaults to OFF), required for filtered/XML/spatial indexes.
+    sqlcmd -S "$SQL_SERVER" -U "$SQL_USER" -C -b -I -f 65001 "$@"
 }
 
 SOURCE=(--source-server "$SQL_SERVER" --source-login "$SQL_USER" --source-password "$SQL_PASSWORD")
@@ -99,6 +101,21 @@ assert_no_snapshots() {
     echo "No database snapshots left behind."
 }
 
+# Empty database with the test schemas but no tables (copy creates them).
+create_empty_db() {
+    local db="$1"
+    sql -Q "IF DB_ID(N'$db') IS NOT NULL BEGIN ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db]; END; CREATE DATABASE [$db];"
+    sql -d "$db" -Q "EXEC (N'CREATE SCHEMA rt'); EXEC (N'CREATE SCHEMA plain');"
+}
+
+# Writes one JSON line per primary key/unique constraint/index of a database (see indexes.sql).
+index_definitions() {
+    local db="$1" dir="$2"
+    rm -rf "$dir"
+    bcpjson export "${SOURCE[@]}" --source-database "$db" --file-format json --export-path "$dir" \
+        --output-name indexes --source-query "$(cat "$HERE/indexes.sql")"
+}
+
 create_target_db() {
     local db="$1"
     sql -Q "IF DB_ID(N'$db') IS NOT NULL BEGIN ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db]; END"
@@ -140,14 +157,28 @@ case "${1:-}" in
         ;;
 
     copy)
-        sql -Q "IF DB_ID(N'BcpJsonCopy') IS NOT NULL BEGIN ALTER DATABASE [BcpJsonCopy] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [BcpJsonCopy]; END; CREATE DATABASE [BcpJsonCopy];"
-        sql -d BcpJsonCopy -Q "EXEC (N'CREATE SCHEMA rt'); EXEC (N'CREATE SCHEMA plain');"
-        # Copies from a point-in-time snapshot, with the default table lock (including the bcp fallback for CLR types).
+        create_empty_db BcpJsonCopy
+        # Copies from a point-in-time snapshot, with the default table lock (including the bcp fallback for CLR types)
+        # and the default index recreation.
         bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonCopy --snapshot
         assert_no_snapshots
         export_json BcpJsonCopy "$WORK/copy-roundtrip"
-        # copy creates the tables without primary keys, so the export order can differ; compare rows as sets.
-        compare_unordered "$WORK/source-json" "$WORK/copy-roundtrip"
+        # Primary keys are recreated, so the copy exports in the same order as the source: compare exactly.
+        compare_exact "$WORK/source-json" "$WORK/copy-roundtrip"
+        # Every primary key, unique constraint and index must match the source definition.
+        index_definitions BcpJsonSource "$WORK/indexes-source"
+        index_definitions BcpJsonCopy "$WORK/indexes-copy"
+        echo "Source has $(grep -c '"index"' "$WORK/indexes-source/indexes.json") primary keys/constraints/indexes."
+        compare_exact "$WORK/indexes-source" "$WORK/indexes-copy"
+
+        # --no-indexes: tables are created without any key or index.
+        create_empty_db BcpJsonCopyNoIdx
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonCopyNoIdx --no-indexes
+        left="$(sql -d BcpJsonCopyNoIdx -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM sys.indexes i JOIN sys.tables t ON t.object_id = i.object_id WHERE i.type > 0 AND t.is_ms_shipped = 0;" | tr -d '[:space:]')"
+        [ "$left" = "0" ] || { echo "::error::--no-indexes still created $left indexes"; exit 1; }
+        echo "--no-indexes: no indexes created."
+        export_json BcpJsonCopyNoIdx "$WORK/copy-noidx"
+        compare_unordered "$WORK/source-json" "$WORK/copy-noidx"
         ;;
 
     snapshot)

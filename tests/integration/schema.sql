@@ -95,3 +95,16 @@ CREATE TABLE plain.Spatial
     Node HIERARCHYID NULL
 );
 GO
+
+/* One index of every kind, so copy's index recreation is checked against a real server (indexes.sql compares them). */
+CREATE UNIQUE NONCLUSTERED INDEX UX_AllTypes_Guid ON rt.AllTypes (c_uniqueidentifier) WHERE c_uniqueidentifier IS NOT NULL;
+CREATE NONCLUSTERED INDEX IX_AllTypes_Int_Date ON rt.AllTypes (c_int DESC, c_date) INCLUDE (c_varchar);
+CREATE PRIMARY XML INDEX PXML_AllTypes_Xml ON rt.AllTypes (c_xml);
+CREATE XML INDEX SXML_AllTypes_Xml_Path ON rt.AllTypes (c_xml) USING XML INDEX PXML_AllTypes_Xml FOR PATH;
+CREATE NONCLUSTERED INDEX [IX odd ]] name's] ON rt.[odd ]] name's] ([semi;col]);
+CREATE CLUSTERED INDEX CX_NoKey_A ON rt.NoKey (A);
+ALTER TABLE plain.Numbers ADD CONSTRAINT UQ_Numbers_Uid UNIQUE NONCLUSTERED (Uid);
+CREATE NONCLUSTERED INDEX IX_Numbers_Stamp ON plain.Numbers (Stamp) WITH (DATA_COMPRESSION = PAGE);
+CREATE NONCLUSTERED COLUMNSTORE INDEX NCCI_Numbers ON plain.Numbers (Big, Amount, Ratio);
+CREATE SPATIAL INDEX SIX_Spatial_Geo ON plain.Spatial (Geo);
+GO

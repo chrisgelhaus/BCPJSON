@@ -218,8 +218,9 @@ SELECT @Columns, @SortOrder;";
                 string name = table.DisplayName;
 
                 // Format file (used by import to map columns). Non-XML, because the Linux bcp does not support -x.
-                string formatArgs = string.Format("{0} format nul {1} -c -f {2} -t|",
-                    Arg(table.QuotedName), connectionArgs, Arg(name + BcpFormatFileSuffix));
+                // "nul" is the no-data-file placeholder on Windows; on Linux bcp would create a file named "nul".
+                string formatArgs = string.Format("{0} format {1} {2} -c -f {3} -t|",
+                    Arg(table.QuotedName), OperatingSystem.IsWindows() ? "nul" : "/dev/null", connectionArgs, Arg(name + BcpFormatFileSuffix));
                 if (ExecuteProcess(BcpTool, formatArgs, outputPath) != 0)
                 {
                     PostToConsole(string.Format("{0}: Error creating format file.", name), InfoLevel.Error);

@@ -93,6 +93,8 @@ namespace bcpJson.Tests
             Assert.True(copy.NoTableLock);
             Assert.True(copy.Snapshot);
             Assert.False(Parsed<CopyOptions>("copy").Snapshot);
+            Assert.False(Parsed<CopyOptions>("copy").NoIndexes);
+            Assert.True(Parsed<CopyOptions>("copy", "--no-indexes").NoIndexes);
 
             Assert.True(Parsed<ExportOptions>("export", "--snapshot").Snapshot);
             Assert.False(Parsed<ExportOptions>("export").Snapshot);

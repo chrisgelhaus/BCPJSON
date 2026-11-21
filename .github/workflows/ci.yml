@@ -116,7 +116,7 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: bash tests/integration/roundtrip.sh bcp
 
-      - name: Copy round trip (copy --snapshot, export)
+      - name: Copy round trip (copy --snapshot with indexes, and --no-indexes)
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: bash tests/integration/roundtrip.sh copy
 
