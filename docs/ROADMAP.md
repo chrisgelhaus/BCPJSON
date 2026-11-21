@@ -15,22 +15,22 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 - Fixes found by CI: Linux bcp has no `-x` (exports now write non-XML `-c.fmt`; import still accepts old `-c.xml`) and no `-o` (bcp stdout is captured in-process into the same `_output.log`).
 - Merged master (PRs #6–#12, Codex): already covered by the refactor except `--max-tasks` for export/import, which was ported via `Parallelism()`.
 
-## Done after v2.1.0
+## Done after v2.1.0 (released in v2.2.0 and v2.3.0)
 
 - Snapshot consistency test (`roundtrip.sh consistency`, CI step "Snapshot consistency under concurrent writes"): a writer (`writer.sql`) moves value between `inv.A` and `inv.B` in `BcpJsonLive` (`consistency.sql`); `export --snapshot` must add up exactly while transfers commit, and an export without `--snapshot` must drift (control).
 - `copy --foreign-keys` (opt-in): after all tables are copied, recreates the FKs of created tables with SMO (WITH CHECK when trusted in the source; disabled/untrusted state mirrored), one at a time. `--drop-target` first drops FKs owned by the tables being recreated, so re-runs work. Rejected with `--no-indexes`; warns without `--snapshot`. CI: one FK of every kind in the test schema, FK definitions compared (`foreign_keys.sql`), plus a `--drop-target` re-run. Released in v2.2.0.
-- Check constraints (default on, `--no-check-constraints`) and triggers (opt-in `--triggers`, created last so they never fire on copied rows; enabled state and FIRST/LAST order applied explicitly). CI: one of each kind in the schema, definitions compared via `check_constraints.sql` / `triggers.sql` (generic `compare_definitions` in roundtrip.sh), and `rt.ChildAudit` proves no trigger fired during copy or import.
+- Check constraints (default on, `--no-check-constraints`) and triggers (opt-in `--triggers`, created last so they never fire on copied rows; enabled state and FIRST/LAST order applied explicitly). CI: one of each kind in the schema, definitions compared via `check_constraints.sql` / `triggers.sql` (generic `compare_definitions` in roundtrip.sh), and `rt.ChildAudit` proves no trigger fired during copy or import. Released in v2.3.0.
 
 ## Releases
 
-- v2.0.0 (2026-11-20): first tagged release. v2.0.1: SqlClient 7, SMO 181, SqlServer.Types 170. **v2.1.0** (2026-11-21, `c154790`): copy recreates keys and indexes; BCP import fix below. **v2.2.0** (`0a172f5`): `copy --foreign-keys`, snapshot consistency test.
+- v2.0.0 (2026-11-20): first tagged release. v2.0.1: SqlClient 7, SMO 181, SqlServer.Types 170. **v2.1.0** (2026-11-21, `c154790`): copy recreates keys and indexes; BCP import fix below. **v2.2.0** (`0a172f5`): `copy --foreign-keys`, snapshot consistency test. **v2.3.0** (2026-11-21, `03fd363`): copy recreates check constraints (default on) and triggers (`--triggers`).
 
 ## Done in v2.1.0 (PR #28)
 
 - **BCP import fix:** `bcp in` now runs with `-q` (QUOTED_IDENTIFIER ON); before, imports into tables with filtered/XML/spatial indexes failed. With `-q` bcp needs the table unbracketed as `schema.table` (names with `.` or `"` fall back to brackets without `-q`). Linux exports no longer leave a stray `nul` file.
 - System-named constraints (declared without a name) get a new system name in the copy; explicitly named ones keep their names.
 - `copy` recreates primary keys, unique constraints and all index kinds on tables it creates, after the load (SMO scripting without filegroups, clustered first, XML/spatial after the PK). On by default; `--no-indexes` opts out. CI adds one index of every kind to the test schema, compares index definitions source vs copy (`tests/integration/indexes.sql`) and now compares copied data exactly (same order thanks to the PKs).
-- Not copied (possible future options): foreign keys, check constraints, triggers.
+- Not copied in v2.1.0: foreign keys, check constraints, triggers (added in v2.2.0 and v2.3.0).
 
 ## Done (branch `feature/tablock-and-snapshot`)
 
@@ -65,5 +65,5 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
    - First CodeQL scan (63 C# + 23 Actions rules): 0 findings.
    - All dependencies upgraded through PRs with green CI (#20–#26): GitHub Actions (checkout v7, setup-dotnet v6, upload-artifact v7, download-artifact v8, attest-build-provenance v4; release workflow dry-run tested), **Microsoft.Data.SqlClient 5.1.3 → 7.1.2 together with SMO 170.18 → 181.46**, Microsoft.SqlServer.Types 160 → 170, Newtonsoft.Json 13.0.4, Test SDK 18, xunit runner 4, coverlet 10. SQL Server round trips identical throughout; `SqlBulkCopyHelper` now has a unit test so a future SqlClient rename of the rows-copied counter fails the build.
    - Merging several Dependabot PRs: branch protection requires each to be up to date, so merge one at a time and let CI rerun on the updated branch (`gh pr update-branch`); Dependabot also rebases its PRs on its own.
-   - **Not yet released:** these upgrades are on master but not in v2.0.0. Tag v2.0.1 (or v2.1.0) when ready.
+   - Released in v2.0.1.
 9. **Later:** winget manifest, `dotnet tool` package on NuGet.org, GHCR container image, Windows code signing (Azure Trusted Signing).
