@@ -1,4 +1,4 @@
-# Roadmap and working notes
+﻿# Roadmap and working notes
 
 Handoff notes so any Claude session (chat, web or terminal) can pick up where the last one stopped.
 
@@ -32,9 +32,9 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
   - **Atomic files:** exports write `<file>.partial` and rename when complete; import ignores `.partial` files.
   - **Manifest + verify + resume:** `bcpjson-manifest.json` per export (tool, format, server, database, snapshot, start/completion, per-table rows and file size/SHA-256), saved after every table. New `verify` verb checks a folder against it without a database. `export --resume` skips tables already intact (same format/database/query required).
   - CI: `roundtrip.sh resilience` checks the manifest, catches a same-size edit and a missing file with `verify`, resumes a simulated crash (skipped files untouched, no `.partial` left, data identical), refuses a mismatched resume, and proves connection retry by renaming a database into place 20 s after the export starts (SqlClient's own single login retry after 10 s is not enough) (control: `--retries 0` fails). BCP and snapshot exports are verified too.
-- Remaining ideas from that review: `SqlBulkCopy` column order hints, splitting very large tables, Entra ID authentication, SQL Server 2019/2025 in CI, linux-arm64/macOS builds, SRID-preserving spatial JSON.
+- Remaining ideas from that review: `SqlBulkCopy` column order hints, Entra ID authentication, SQL Server 2019/2025 in CI, linux-arm64/macOS builds, SRID-preserving spatial JSON.
 
-## Done after v2.4.0
+## Done after v2.4.0 (released in v2.5.0)
 
 - Compression and streaming JSON import (ideas 5 and 6 of the 2026-11-21 review; options weighed and defaults chosen on 2026-11-22):
   - **`--compress none|gzip`, default none.** Plain files stay diffable, which is the point of the format, and existing scripts keep working. gzip over zstd (needs a third-party package on .NET 8) and brotli (slow at good levels) because everything can read it. JSON is compressed while written; BCP after bcp finishes (bcp only writes plain files). Format files and the manifest stay plain. The manifest records the setting and `--resume` refuses a mismatch.
@@ -44,9 +44,26 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
   - **`import --batch-size`, default 50,000** (as before for JSON; bcp import was 10,000), 0 = one transaction per file.
   - CI: `roundtrip.sh compression`. gzip JSON export matches the plain export after `zcat`; `.gz` import with 1,000-row batches and with `--batch-size 0`; gzip BCP export and import at `smallest`; verify on compressed exports; resume of a gzip export and refusal to resume it uncompressed. The `json` step covers the streaming import with plain files.
 
+## TODO: extremely large tables
+
+Decide how bcpJson should handle very large tables (hundreds of millions of rows, or files of tens to hundreds of GB). Today the table is the unit of work everywhere, so one huge table:
+
+- is exported and imported by a single thread (parallelism is across tables), so it sets the length of the whole run;
+- is redone from the start when a transient error triggers a retry, and `--resume` can only skip whole tables;
+- becomes one file, which is slow to copy, hash (`verify`) and diff; BCP with `--compress gzip` also needs room for the uncompressed file;
+- on a heap without a primary key is sorted by every column for the JSON export, which can need a huge sort in tempdb;
+- with `import --batch-size 0` becomes one transaction, which needs log space for the whole file.
+
+Options to weigh, with a default for each, as for compression:
+
+- **Split by key range:** `<schema>.<table>.part0001.json` per range of the clustered key (or PK). Parts export and import in parallel, retry and resume one by one, and show up in the manifest as one table with several files. Open questions: picking ranges (statistics histogram, `NTILE`, fixed key steps), tables without a usable key, and keeping parts in key order so joined parts equal today's single file.
+- **Split by size:** start a new part every N rows or N MB while streaming. Simpler, and works without a key, but parts still come from one reader, so it helps retry, resume and file size rather than speed.
+- **Thresholds:** split only tables above a size such as `--split-above 10GB`, so small tables keep one file and existing exports don't change.
+- Import and `copy` sides: load the parts of one table in parallel (TABLOCK into a heap allows parallel bulk loads; a clustered index does not). For copy, possibly per-range `SqlBulkCopy` streams.
+
 ## Releases
 
-- v2.0.0 (2026-11-20): first tagged release. v2.0.1: SqlClient 7, SMO 181, SqlServer.Types 170. **v2.1.0** (2026-11-21, `c154790`): copy recreates keys and indexes; BCP import fix below. **v2.2.0** (`0a172f5`): `copy --foreign-keys`, snapshot consistency test. **v2.3.0** (2026-11-21, `03fd363`): copy recreates check constraints (default on) and triggers (`--triggers`). **v2.3.1** (2026-11-21, `5b37f35`): JSON export/import keep all 38 digits of `decimal`/`numeric` (export used to fail beyond 28-29 digits). **v2.4.0** (2026-11-21, `bb075a3`): `--retries` (connection and table-export retries), atomic `.partial` export files, `bcpjson-manifest.json` with the new `verify` verb and `export --resume`.
+- v2.0.0 (2026-11-20): first tagged release. v2.0.1: SqlClient 7, SMO 181, SqlServer.Types 170. **v2.1.0** (2026-11-21, `c154790`): copy recreates keys and indexes; BCP import fix below. **v2.2.0** (`0a172f5`): `copy --foreign-keys`, snapshot consistency test. **v2.3.0** (2026-11-21, `03fd363`): copy recreates check constraints (default on) and triggers (`--triggers`). **v2.3.1** (2026-11-21, `5b37f35`): JSON export/import keep all 38 digits of `decimal`/`numeric` (export used to fail beyond 28-29 digits). **v2.4.0** (2026-11-21, `bb075a3`): `--retries` (connection and table-export retries), atomic `.partial` export files, `bcpjson-manifest.json` with the new `verify` verb and `export --resume`. **v2.5.0** (2026-11-22, `ac59a22`): `export --compress gzip` / `--compression-level`, streaming JSON import, `import --batch-size`.
 
 ## Done in v2.1.0 (PR #28)
 
