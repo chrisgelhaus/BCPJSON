@@ -5,6 +5,7 @@ using System.Data;
 using System.Data.SqlTypes;
 using System.Globalization;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -99,7 +100,7 @@ SELECT @Columns, @SortOrder;";
 
             Parallel.ForEach(tables, Parallelism(options.MaxParallelTasks), table =>
             {
-                string fileName = table.DisplayName + ".json";
+                string fileName = options.DataFileName(table.DisplayName, ".json");
                 try
                 {
                     // Exporting a table only rewrites its file, so a transient failure retries the whole table.
@@ -133,7 +134,7 @@ SELECT @Columns, @SortOrder;";
                         cmd.CommandTimeout = 0;
                         using (var reader = cmd.ExecuteReader(CommandBehavior.SingleResult | CommandBehavior.SequentialAccess))
                         {
-                            long rows = WriteJsonRows(reader, PartialPath(filePath), table.DisplayName);
+                            long rows = WriteJsonRows(reader, PartialPath(filePath), table.DisplayName, options.GzipLevel);
                             CommitPartial(filePath);
                             return rows;
                         }
@@ -153,7 +154,7 @@ SELECT @Columns, @SortOrder;";
         /// </summary>
         private static long ExportQueryToJSON(ExportOptions options, ExportManifest manifest)
         {
-            string fileName = options.OutputName + ".json";
+            string fileName = options.DataFileName(options.OutputName, ".json");
             string filePath = Path.Combine(options.exportPath, fileName);
             if (options.Resume && manifest.IsIntact(options.OutputName, options.exportPath, false))
             {
@@ -171,7 +172,7 @@ SELECT @Columns, @SortOrder;";
                         cmd.CommandTimeout = 0;
                         using (var reader = cmd.ExecuteReader(CommandBehavior.SingleResult | CommandBehavior.SequentialAccess))
                         {
-                            long rows = WriteJsonRows(reader, PartialPath(filePath), options.OutputName);
+                            long rows = WriteJsonRows(reader, PartialPath(filePath), options.OutputName, options.GzipLevel);
                             CommitPartial(filePath);
                             manifest.Record(ManifestEntry(options.OutputName, rows, options.exportPath, fileName), options.exportPath);
                             PostToConsole(string.Format("{0}: {1:N0} (Complete)", options.OutputName, rows), InfoLevel.Success);
@@ -263,13 +264,14 @@ SELECT @Columns, @SortOrder;";
             }
         }
 
-        private static long WriteJsonRows(SqlDataReader records, string filePath, string label)
+        /// <summary>Writes the rows as a JSON array, one row object per line; gzip-compressed when <paramref name="gzipLevel"/> is set.</summary>
+        private static long WriteJsonRows(SqlDataReader records, string filePath, string label, CompressionLevel? gzipLevel)
         {
             long rows = 0;
             string[] names = Enumerable.Range(0, records.FieldCount).Select(records.GetName).ToArray();
             bool[] isDecimal = Enumerable.Range(0, records.FieldCount).Select(i => IsSqlDecimalType(records.GetDataTypeName(i))).ToArray();
 
-            using (var jsonWriter = new JsonTextWriter(new StreamWriter(filePath, false)))
+            using (var jsonWriter = new JsonTextWriter(FileCompression.CreateText(filePath, gzipLevel)))
             {
                 jsonWriter.WriteStartArray();
                 while (records.Read())
@@ -315,9 +317,10 @@ SELECT @Columns, @SortOrder;";
                 try
                 {
                     // bcp reports no error numbers, so any bcp failure is retried; the table's files are simply rewritten.
+                    string dataFile = options.DataFileName(name, ".bcp");
                     long rows = WithRetries(name, options.Retries,
-                        () => ExportTableToBcp(table, connectionArgs, outputPath), ex => ex is BcpFailedException);
-                    manifest.Record(ManifestEntry(name, rows, outputPath, name + ".bcp", name + BcpFormatFileSuffix), outputPath);
+                        () => ExportTableToBcp(table, connectionArgs, outputPath, options.GzipLevel), ex => ex is BcpFailedException);
+                    manifest.Record(ManifestEntry(name, rows, outputPath, dataFile, name + BcpFormatFileSuffix), outputPath);
                     if (rows > 0)
                     {
                         Interlocked.Add(ref totalrowCount, rows);
@@ -335,13 +338,15 @@ SELECT @Columns, @SortOrder;";
 
         /// <summary>
         /// Writes a table's format and data files as .partial files and renames both once bcp has succeeded.
-        /// Throws <see cref="BcpFailedException"/> when bcp fails.
+        /// With <paramref name="gzipLevel"/>, the data file is then compressed to &lt;name&gt;.bcp.gz (bcp cannot write
+        /// to a compressed stream). Throws <see cref="BcpFailedException"/> when bcp fails.
         /// </summary>
-        private static long ExportTableToBcp(TableRef table, string connectionArgs, string outputPath)
+        private static long ExportTableToBcp(TableRef table, string connectionArgs, string outputPath, CompressionLevel? gzipLevel)
         {
             string name = table.DisplayName;
             string formatPath = Path.Combine(outputPath, name + BcpFormatFileSuffix);
             string dataPath = Path.Combine(outputPath, name + ".bcp");
+            string gzipPath = dataPath + FileCompression.GzipExtension;
             try
             {
                 // Format file (used by import to map columns). Non-XML, because the Linux bcp does not support -x.
@@ -363,16 +368,35 @@ SELECT @Columns, @SortOrder;";
                     throw new BcpFailedException(string.Format("bcp export failed. See {0}_error.log and {1}.", name, outputLog));
                 }
 
+                CommitData(dataPath, gzipLevel);
                 CommitPartial(formatPath);
-                CommitPartial(dataPath);
                 return ReadBcpRowCount(Path.Combine(outputPath, outputLog));
             }
             catch
             {
                 DiscardPartial(formatPath);
                 DiscardPartial(dataPath);
+                DiscardPartial(gzipPath);
                 throw;
             }
+        }
+
+        /// <summary>
+        /// Renames bcp's finished &lt;data&gt;.partial into place, or with <paramref name="gzipLevel"/> compresses it to
+        /// &lt;data&gt;.gz (via its own .partial) and deletes the uncompressed file.
+        /// </summary>
+        private static void CommitData(string dataPath, CompressionLevel? gzipLevel)
+        {
+            if (!gzipLevel.HasValue)
+            {
+                CommitPartial(dataPath);
+                return;
+            }
+
+            string gzipPath = dataPath + FileCompression.GzipExtension;
+            FileCompression.CompressFile(PartialPath(dataPath), PartialPath(gzipPath), gzipLevel.Value);
+            CommitPartial(gzipPath);
+            DiscardPartial(dataPath);
         }
 
         /// <summary>--source-query with bcp queryout. Not retried (the query may have side effects).</summary>
@@ -385,10 +409,11 @@ SELECT @Columns, @SortOrder;";
             }
 
             string name = options.OutputName;
+            string dataFile = options.DataFileName(name, ".bcp");
             string dataPath = Path.Combine(options.exportPath, name + ".bcp");
             if (options.Resume && manifest.IsIntact(name, options.exportPath, false))
             {
-                PostToConsole(string.Format("--resume: {0}.bcp already exported.", name));
+                PostToConsole(string.Format("--resume: {0} already exported.", dataFile));
                 return 0;
             }
 
@@ -404,9 +429,19 @@ SELECT @Columns, @SortOrder;";
                 return -1;
             }
 
-            CommitPartial(dataPath);
+            try
+            {
+                CommitData(dataPath, options.GzipLevel);
+            }
+            catch (Exception ex)
+            {
+                DiscardPartial(dataPath);
+                DiscardPartial(dataPath + FileCompression.GzipExtension);
+                PostToConsole(string.Format("{0}: {1}", name, ex.Message), InfoLevel.Error);
+                return -1;
+            }
             long rows = ReadBcpRowCount(Path.Combine(options.exportPath, outputLog));
-            manifest.Record(ManifestEntry(name, rows, options.exportPath, name + ".bcp"), options.exportPath);
+            manifest.Record(ManifestEntry(name, rows, options.exportPath, dataFile), options.exportPath);
             PostToConsole(string.Format("{0}: {1:N0}", name, rows), InfoLevel.Info);
             return rows;
         }

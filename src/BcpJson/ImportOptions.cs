@@ -47,6 +47,9 @@ namespace bcpJson
         [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries when opening a connection fails transiently (network error, failover, throttling), with exponential backoff. Loads themselves are not retried. 0 = no retries.")]
         public int Retries { get; set; }
 
+        [Option("batch-size", Default = Program.DefaultBatchSize, Required = false, HelpText = "Rows per committed batch during the load (JSON and bcp). Larger batches load faster; a failure rolls back only the current batch. 0 = the whole file in one transaction.")]
+        public int BatchSize { get; set; } = Program.DefaultBatchSize;
+
         public string GetTargetConnectionString()
         {
             return SqlConnectionFactory.Build(this.TargetSQLServer, this.TargetSQLDatabase, this.TargetSQLLogin, this.TargetSQLPassword, false, this.TrustServerCertificate);
@@ -56,6 +59,12 @@ namespace bcpJson
         {
             if (!SqlConnectionFactory.ApplyRetries(this.Retries))
             {
+                return false;
+            }
+
+            if (this.BatchSize < 0)
+            {
+                Program.PostToConsole("--batch-size must be 0 (one transaction per file) or more.", Program.InfoLevel.Error);
                 return false;
             }
 

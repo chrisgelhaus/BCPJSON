@@ -25,6 +25,8 @@ After reading about how Facebook backs up its MySQL fleet at scale — and, just
 - **Fast loads by default:** imports and copies take a table lock (`TABLOCK`), which allows minimal logging. Opt out with `--no-table-lock` — see [Table locking](#table-locking).
 - **Point-in-time exports:** `--snapshot` reads every table from a database snapshot, so a long export or copy reflects one moment — see [Consistent point-in-time exports](#consistent-point-in-time-exports).
 - **Resilient runs:** transient failures (network drops, failovers, throttling) are retried; export files only appear under their real names once complete; every export writes a manifest with each file's SHA-256, can be checked later with `verify`, and an interrupted export continues with `--resume` — see [Resilience](#resilience).
+- **Compression:** `--compress gzip` writes `.json.gz` / `.bcp.gz` files, typically 5-10 times smaller; import reads them directly — see [Compressed exports](#compressed-exports).
+- **Streaming JSON import:** rows go from the file straight into the bulk load, so memory use stays flat however large the table.
 - Windows Authentication by default; SQL logins supported.
 - Exit code `0` on success, `1` if anything reported an error — suitable for scheduled jobs.
 
@@ -104,11 +106,15 @@ bcpjson export --source-database AdventureWorks --file-format json --export-path
 | `--log-file` | Also append all console messages to this file. |
 | `--max-tasks` | Maximum tables exported in parallel (default unlimited). |
 | `--snapshot` | Export from a database snapshot so every table reflects the same moment (see [Consistent point-in-time exports](#consistent-point-in-time-exports)). |
+| `--compress` | `none` (default) or `gzip`. See [Compressed exports](#compressed-exports). |
+| `--compression-level` | gzip level: `fastest` (default), `optimal` or `smallest`. |
+| `--retries`, `--resume` | See [Resilience](#resilience). |
 
 **Output files**
 
-- JSON: `<schema>.<table>.json`
-- BCP: `<schema>.<table>.bcp` (pipe-delimited character data), `<schema>.<table>-c.fmt` (format file, needed for import; older exports' `-c.xml` files are still accepted), plus `_output.log` / `_error.log` from bcp.
+- JSON: `<schema>.<table>.json` (`.json.gz` with `--compress gzip`)
+- BCP: `<schema>.<table>.bcp` (pipe-delimited character data; `.bcp.gz` with `--compress gzip`), `<schema>.<table>-c.fmt` (format file, needed for import; older exports' `-c.xml` files are still accepted), plus `_output.log` / `_error.log` from bcp.
+- `bcpjson-manifest.json` (see [The export manifest](#the-export-manifest)).
 
 ### Import
 
@@ -122,6 +128,10 @@ bcpjson import --file-format json --source-path C:\dumps\aw --source-file "*.jso
 # One BCP file into an explicitly named table
 bcpjson import --file-format bcp --source-path C:\dumps\aw --source-file Sales.Customer.bcp `
                --target-database Scratch --target-table dbo.CustomerCopy
+
+# A compressed export, each file in a single transaction
+bcpjson import --file-format json --source-path D:\dumps\aw --source-file "*.json.gz" `
+               --target-database AdventureWorks_Restore --batch-size 0
 ```
 
 | Option | Description |
@@ -135,9 +145,14 @@ bcpjson import --file-format bcp --source-path C:\dumps\aw --source-file Sales.C
 | `--truncate-target` | Truncate the table before loading. |
 | `--max-tasks` | Maximum files imported in parallel (default unlimited). |
 | `--no-table-lock` | Load without a table lock (default: locked). See [Table locking](#table-locking). |
-| `--trust-server-certificate`, `--log-file` | As for export. |
+| `--batch-size` | Rows per committed batch (default `50000`). `0` loads each file in one transaction. |
+| `--trust-server-certificate`, `--log-file`, `--retries` | As for export. |
 
 Identity values and NULLs are preserved. Computed and `rowversion` columns are skipped and recalculated by the server.
+
+Compressed files (`.json.gz`, `.bcp.gz`) are recognised by their extension; the table name comes from the name without `.gz`. Use a pattern that matches them, such as `*.json.gz`. JSON files, compressed or not, are streamed: each row is parsed and handed to the bulk load as it is read, so memory use does not grow with the table. BCP files are decompressed to the temp folder first, because `bcp` reads only plain files, so that needs free space for the largest uncompressed file.
+
+**Batch size.** Each batch is committed on its own. If a load fails, the batches already committed stay in the table, so rerun with `--truncate-target`. Larger batches load a little faster and commit less often. Use `--batch-size 0` to get all or nothing per file, at the cost of one long transaction, which needs log space for the whole file unless the load is minimally logged.
 
 ### Copy
 
@@ -244,7 +259,7 @@ Every load asks SQL Server for a table lock (`TABLOCK`) on the target table: `Sq
 - far less lock management and no lock escalation part-way through the load;
 - under the **SIMPLE** or **BULK_LOGGED** recovery model the load can be **minimally logged** (for example into a heap or an empty table), which cuts transaction-log writes dramatically. Under FULL recovery every row is still logged, but the locking savings remain.
 
-The lock is held while each batch is written (10,000 rows for BCP and copy, 50,000 for JSON import), so for practical purposes other sessions cannot use the table until the load finishes. On a heap the lock is a bulk-update (BU) lock; on a table with a clustered index it is an exclusive table lock.
+The lock is held while each batch is written (`--batch-size`, 50,000 rows by default, for import; 10,000 for copy), so for practical purposes other sessions cannot use the table until the load finishes. On a heap the lock is a bulk-update (BU) lock; on a table with a clustered index it is an exclusive table lock.
 
 ### Table locking examples
 
@@ -414,7 +429,28 @@ If an export stops partway (a crash, a reboot, a table that kept failing), rerun
 bcpjson export --source-database Sales --file-format json --export-path D:\dumps\sales --resume
 ```
 
-Tables that the manifest records, and whose files still have the recorded size, are skipped; everything else is exported. The run must use the same `--file-format`, `--source-database` and `--source-query` as the manifest, otherwise it stops with an error. With `--snapshot`, each run takes its own snapshot, so tables from the earlier run reflect an earlier point in time (a warning says so). Use a fresh export when one point in time matters more than saving the work already done.
+Tables that the manifest records, and whose files still have the recorded size, are skipped; everything else is exported. The run must use the same `--file-format`, `--compress`, `--source-database` and `--source-query` as the manifest, otherwise it stops with an error. With `--snapshot`, each run takes its own snapshot, so tables from the earlier run reflect an earlier point in time (a warning says so). Use a fresh export when one point in time matters more than saving the work already done.
+
+## Compressed exports
+
+**Applies to:** `export` (JSON and BCP); `import` reads the results. **Default:** off. **Options:** `--compress gzip`, `--compression-level fastest|optimal|smallest`.
+
+```powershell
+# Nightly JSON backup, compressed
+bcpjson export --source-database Sales --file-format json --export-path D:\dumps\sales --compress gzip
+
+# Smallest files for archive storage (slower to write)
+bcpjson export --source-database Sales --file-format bcp --export-path D:\archive\sales --compress gzip --compression-level smallest
+```
+
+- **JSON** is compressed while it is written, so no uncompressed copy ever reaches the disk.
+- **BCP** data is compressed after `bcp` has written it (bcp can only write plain files), so the export briefly needs room for one table's uncompressed file. Format files stay uncompressed.
+- The manifest records `"compression": "gzip"` and the size and SHA-256 of the `.gz` files, so `verify` works the same. `--resume` refuses to continue an export with a different `--compress` setting.
+- `gzip` was chosen because every platform can read it without bcpJson: `zcat`, `gzip -d`, 7-Zip, `tar`. To diff two compressed exports, decompress them first, for example `diff <(zcat a/dbo.T.json.gz) <(zcat b/dbo.T.json.gz)`.
+
+**Which level?** `fastest` (the default) gets most of the reduction: row-per-line JSON usually shrinks 5-10 times. It is fast enough not to slow down an export. `optimal` saves a little more space for noticeably more CPU, and `smallest` more again; use them for archives written once and kept long.
+
+**Why compression is off by default.** Plain files can be diffed line by line, opened in any editor and read by any tool. That was the point of bcpJson's format, and existing scripts expect `.json` and `.bcp` names. Turn it on when disk space or copy time matters more.
 
 ## JSON format
 
@@ -468,6 +504,8 @@ The solution `BcpJson.sln` holds the app in `src/BcpJson/` and the xUnit tests i
 | `Program.cs` | Entry point, verb dispatch, console/log output, external process runner |
 | `Program.Export.cs` | JSON and BCP export, per-table metadata query |
 | `Program.Import.cs` | JSON (SqlBulkCopy) and BCP import |
+| `JsonRowReader.cs` | Streams a JSON export into SqlBulkCopy as a data reader |
+| `FileCompression.cs` | gzip reading and writing for `--compress` |
 | `Program.Copy.cs` | Server-to-server copy (SMO + SqlBulkCopy) |
 | `Program.Snapshot.cs` | Database snapshots for `--snapshot` |
 | `Program.Resilience.cs` | Retries for transient failures, `.partial` files |

@@ -13,6 +13,8 @@
 #                          without --snapshot the same export must drift (proves the check works)
 #   roundtrip.sh resilience   manifest + verify (and tampering caught), export --resume after a simulated crash,
 #                          connection retry while the database comes online
+#   roundtrip.sh compression  export --compress gzip (JSON and BCP) -> verify -> import the .gz files (small and
+#                          single-transaction batches) -> export JSON, diff with the source export; --resume rules
 #
 # Table locking: JSON import and copy use the default (TABLOCK); BCP import uses --no-table-lock.
 #
@@ -164,6 +166,27 @@ compare_definitions() {
     done
 }
 
+# Copies the plain.* tables of the source JSON export into a folder (the BCP round trips cover schema "plain" only).
+source_json_plain() {
+    mkdir -p "$WORK/source-json-plain"
+    rm -f "$WORK/source-json-plain"/*
+    cp "$WORK/source-json"/plain.*.json "$WORK/source-json-plain/"
+}
+
+# Fails unless every data file in a folder is a valid gzip file with the given extension and nothing else is compressed.
+assert_gzip_export() {
+    local dir="$1" ext="$2" f count=0
+    for f in "$dir"/*; do
+        case "$(basename "$f")" in
+            "$MANIFEST"|*-c.fmt|*.log) continue ;;
+            *"$ext.gz") gzip -t "$f" || { echo "::error::$f is not valid gzip"; return 1; }; count=$((count + 1)) ;;
+            *) echo "::error::Unexpected file in a compressed export: $f"; return 1 ;;
+        esac
+    done
+    [ "$(jq -r '.compression' "$dir/$MANIFEST")" = "gzip" ] || { echo "::error::Manifest does not record gzip"; return 1; }
+    echo "$count valid $ext.gz files."
+}
+
 create_target_db() {
     local db="$1"
     sql -Q "IF DB_ID(N'$db') IS NOT NULL BEGIN ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db]; END"
@@ -209,9 +232,7 @@ case "${1:-}" in
         bcpjson import "${TARGET[@]}" --target-database BcpJsonBcp --file-format bcp --no-table-lock --source-path "$WORK/source-bcp" --source-file '*.bcp'
         compare_decimals BcpJsonBcp
         export_json BcpJsonBcp "$WORK/bcp-roundtrip" --include-schemas plain
-        mkdir -p "$WORK/source-json-plain"
-        rm -f "$WORK/source-json-plain"/*
-        cp "$WORK/source-json"/plain.*.json "$WORK/source-json-plain/"
+        source_json_plain
         compare_exact "$WORK/source-json-plain" "$WORK/bcp-roundtrip"
         ;;
 
@@ -374,8 +395,69 @@ case "${1:-}" in
         sql -Q "DROP DATABASE BcpJsonLate;"
         ;;
 
+    compression)
+        command -v jq >/dev/null || { echo "jq not found on PATH"; exit 1; }
+        src="$WORK/source-json"
+        gz="$WORK/gz-json"
+
+        # 1. JSON with gzip: every data file is <table>.json.gz, verify passes, and the content is the plain export's.
+        export_json BcpJsonSource "$gz" --compress gzip
+        ls -l "$gz"
+        assert_gzip_export "$gz" .json
+        bcpjson verify --path "$gz"
+        echo "Plain $(du -sb --exclude="$MANIFEST" "$src" | cut -f1) bytes, gzip $(du -sb --exclude="$MANIFEST" "$gz" | cut -f1) bytes."
+        rm -rf "$WORK/gz-json-unzipped"
+        mkdir -p "$WORK/gz-json-unzipped"
+        for f in "$gz"/*.json.gz; do
+            zcat "$f" > "$WORK/gz-json-unzipped/$(basename "$f" .gz)"
+        done
+        compare_exact "$src" "$WORK/gz-json-unzipped"
+
+        # 2. Import the .gz files directly (streamed), in small batches so every table spans several commits.
+        create_target_db BcpJsonGz
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonGz --file-format json --max-tasks 2 --batch-size 1000 --source-path "$gz" --source-file '*.json.gz'
+        compare_decimals BcpJsonGz
+        export_json BcpJsonGz "$WORK/gz-json-roundtrip"
+        compare_exact "$src" "$WORK/gz-json-roundtrip"
+
+        # 3. --batch-size 0: each file is one transaction.
+        create_target_db BcpJsonGzOne
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonGzOne --file-format json --batch-size 0 --source-path "$gz" --source-file 'plain.*.json.gz'
+        source_json_plain
+        export_json BcpJsonGzOne "$WORK/gz-one-roundtrip" --include-schemas plain
+        compare_exact "$WORK/source-json-plain" "$WORK/gz-one-roundtrip"
+
+        # 4. BCP with gzip (compressed after bcp writes the file): format files stay plain, no .bcp is left behind;
+        #    import decompresses to a temporary file.
+        rm -rf "$WORK/gz-bcp"
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format bcp --include-schemas plain --export-path "$WORK/gz-bcp" --compress gzip --compression-level smallest
+        ls -l "$WORK/gz-bcp"
+        assert_gzip_export "$WORK/gz-bcp" .bcp
+        bcpjson verify --path "$WORK/gz-bcp"
+        create_target_db BcpJsonBcpGz
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonBcpGz --file-format bcp --batch-size 0 --source-path "$WORK/gz-bcp" --source-file '*.bcp.gz'
+        compare_decimals BcpJsonBcpGz
+        export_json BcpJsonBcpGz "$WORK/gz-bcp-roundtrip" --include-schemas plain
+        compare_exact "$WORK/source-json-plain" "$WORK/gz-bcp-roundtrip"
+
+        # 5. --resume continues a gzip export (one table missing) and refuses to continue it uncompressed.
+        res="$WORK/gz-resume"
+        rm -rf "$res"
+        cp -r "$gz" "$res"
+        rm "$res/plain.Ref.json.gz"
+        jq '.completed = null | .tables |= map(select(.name != "plain.Ref"))' "$gz/$MANIFEST" > "$res/$MANIFEST"
+        if bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format json --export-path "$res" --resume > "$WORK/gz-resume-conflict.log" 2>&1; then
+            echo "::error::--resume continued a gzip export uncompressed"; exit 1
+        fi
+        grep -q "Cannot resume: the existing export uses --compress gzip, not none" "$WORK/gz-resume-conflict.log" || { cat "$WORK/gz-resume-conflict.log"; exit 1; }
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format json --export-path "$res" --resume --compress gzip | tee "$WORK/gz-resume.log"
+        grep -q "1 to go" "$WORK/gz-resume.log" || { echo "::error::--resume did not export exactly the missing table"; exit 1; }
+        bcpjson verify --path "$res"
+        cmp <(zcat "$gz/plain.Ref.json.gz") <(zcat "$res/plain.Ref.json.gz") || { echo "::error::Resumed plain.Ref differs"; exit 1; }
+        ;;
+
     *)
-        echo "usage: $0 setup|json|bcp|copy|snapshot|consistency|resilience" >&2
+        echo "usage: $0 setup|json|bcp|copy|snapshot|consistency|resilience|compression" >&2
         exit 2
         ;;
 esac

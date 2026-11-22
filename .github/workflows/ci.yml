@@ -132,6 +132,10 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: bash tests/integration/roundtrip.sh resilience
 
+      - name: Compression (gzip JSON and BCP, streamed import, batch sizes)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: bash tests/integration/roundtrip.sh compression
+
       - name: Upload exported files
         if: failure()
         uses: actions/upload-artifact@v7

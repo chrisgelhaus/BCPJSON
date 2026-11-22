@@ -13,7 +13,8 @@ namespace bcpJson
 {
     partial class Program
     {
-        private const int JsonImportBatchSize = 50000;
+        /// <summary>Default rows per committed batch for imports (--batch-size).</summary>
+        internal const int DefaultBatchSize = 50000;
 
         /// <summary>A target column that can be loaded (computed and rowversion columns are skipped).</summary>
         private sealed record ImportColumn(string Name, string TypeName, bool IsIdentity, bool IsClrType);
@@ -44,14 +45,22 @@ namespace bcpJson
         /// each part itself, so the name must be passed unbracketed as schema.table (verified against SQL Server 2022
         /// with names containing spaces, ']' and '''). A name containing '.' or '"' cannot be expressed that way and is
         /// passed bracketed without -q, which works for every table except those index types.</item>
+        /// <item>-b commits every <paramref name="batchSize"/> rows; 0 leaves it out, so the whole file is one transaction.</item>
         /// </list>
         /// </summary>
-        internal static string BcpInArguments(string schema, string table, string dataFile, string formatFile, string connectionArgs, bool noTableLock, string errorLog)
+        internal static string BcpInArguments(string schema, string table, string dataFile, string formatFile, string connectionArgs, bool noTableLock, string errorLog, int batchSize)
         {
             bool splittable = schema.IndexOf('.') < 0 && table.IndexOf('.') < 0 && schema.IndexOf('"') < 0 && table.IndexOf('"') < 0;
             string tableArg = splittable ? Arg(schema + "." + table) : Arg(QuoteName(schema) + "." + QuoteName(table));
-            return string.Format("{0} in {1} -f {2} {3} -E -k{4} -b 10000{5} -e {6}",
-                tableArg, Arg(dataFile), Arg(formatFile), connectionArgs, splittable ? " -q" : string.Empty, BcpLoadHints(noTableLock), Arg(errorLog));
+            string batch = batchSize > 0 ? " -b " + batchSize.ToString(CultureInfo.InvariantCulture) : string.Empty;
+            return string.Format("{0} in {1} -f {2} {3} -E -k{4}{5}{6} -e {7}",
+                tableArg, Arg(dataFile), Arg(formatFile), connectionArgs, splittable ? " -q" : string.Empty, batch, BcpLoadHints(noTableLock), Arg(errorLog));
+        }
+
+        /// <summary>The table name a data file loads into by default: the file name without .gz and its extension.</summary>
+        internal static string ImportBaseName(string fileName)
+        {
+            return Path.GetFileNameWithoutExtension(FileCompression.WithoutGzipExtension(fileName));
         }
 
         /// <summary>False for the export manifest and for unfinished ".partial" files, which a wildcard like *.json or * may match.</summary>
@@ -82,8 +91,9 @@ namespace bcpJson
 
             Parallel.ForEach(FindSourceFiles(options), Parallelism(options.MaxParallelTasks), file =>
             {
-                string baseFileName = Path.GetFileNameWithoutExtension(file.Name);
+                string baseFileName = ImportBaseName(file.Name);
                 string tableName = string.IsNullOrEmpty(options.TargetTable) ? baseFileName : options.TargetTable;
+                string tempFolder = null;
 
                 try
                 {
@@ -114,8 +124,19 @@ namespace bcpJson
                         PostToConsole(string.Format("{0}: Truncate Complete.", label));
                     }
 
+                    // bcp cannot read gzip: decompress to a temporary folder (the source folder may be read-only).
+                    string dataFile = file.Name;
+                    if (FileCompression.IsCompressedFile(file.Name))
+                    {
+                        tempFolder = Path.Combine(Path.GetTempPath(), "bcpjson", Guid.NewGuid().ToString("N"));
+                        Directory.CreateDirectory(tempFolder);
+                        dataFile = Path.Combine(tempFolder, baseFileName + ".bcp");
+                        PostToConsole(string.Format("{0}: Decompressing {1}.", label, file.Name));
+                        FileCompression.DecompressFile(file.FullName, dataFile);
+                    }
+
                     string outputLog = baseFileName + "_import_output.log";
-                    string args = BcpInArguments(target[0], target[1], file.Name, formatFile, connectionArgs, options.NoTableLock, baseFileName + "_import_error.log");
+                    string args = BcpInArguments(target[0], target[1], dataFile, formatFile, connectionArgs, options.NoTableLock, baseFileName + "_import_error.log", options.BatchSize);
 
                     if (ExecuteProcess(BcpTool, args, workingPath, outputLog) == 0)
                     {
@@ -135,9 +156,29 @@ namespace bcpJson
                 {
                     PostToConsole(string.Format("{0}: {1}", file.Name, ex.Message), InfoLevel.Error);
                 }
+                finally
+                {
+                    DeleteTempFolder(tempFolder);
+                }
             });
 
             return totalrowCount;
+        }
+
+        private static void DeleteTempFolder(string folder)
+        {
+            if (folder == null)
+            {
+                return;
+            }
+            try
+            {
+                Directory.Delete(folder, true);
+            }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+            {
+                PostToConsole(string.Format("Could not delete temporary folder {0}: {1}", folder, ex.Message), InfoLevel.Warning);
+            }
         }
 
         private static long ImportFromJSON(ImportOptions options)
@@ -146,7 +187,7 @@ namespace bcpJson
 
             Parallel.ForEach(FindSourceFiles(options), Parallelism(options.MaxParallelTasks), file =>
             {
-                string tableName = string.IsNullOrEmpty(options.TargetTable) ? Path.GetFileNameWithoutExtension(file.Name) : options.TargetTable;
+                string tableName = string.IsNullOrEmpty(options.TargetTable) ? ImportBaseName(file.Name) : options.TargetTable;
                 try
                 {
                     long rows = ImportJsonFile(file.FullName, tableName, options);
@@ -163,8 +204,9 @@ namespace bcpJson
         }
 
         /// <summary>
-        /// Streams one exported JSON file (an array of row objects) into an existing table with SqlBulkCopy.
-        /// Values are converted using the target column types. Tables with CLR-type columns (geography, geometry,
+        /// Streams one exported JSON file (an array of row objects; .gz files are decompressed on the fly) into an
+        /// existing table: SqlBulkCopy reads the rows through a <see cref="JsonRowReader"/>, committing every
+        /// --batch-size rows. Values are converted using the target column types. Tables with CLR-type columns (geography, geometry,
         /// hierarchyid) are loaded through a #temp staging table holding those columns as text, then inserted with ::Parse().
         /// </summary>
         private static long ImportJsonFile(string filePath, string tableName, ImportOptions options)
@@ -206,72 +248,25 @@ namespace bcpJson
                     bulkTarget = "#bcpjson_stage";
                 }
 
-                DataTable buffer = CreateBuffer(conn, bulkTarget, columns);
-                var ordinals = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-                foreach (DataColumn dc in buffer.Columns)
-                {
-                    ordinals[dc.ColumnName] = dc.Ordinal;
-                }
-
-                long rows = 0;
+                List<(string Name, Type Type)> bulkColumns = GetBulkColumns(conn, bulkTarget, columns);
+                long rows;
                 using (var bulkCopy = new SqlBulkCopy(conn, LoadOptions(options.NoTableLock), null))
                 {
                     bulkCopy.DestinationTableName = bulkTarget;
                     bulkCopy.BulkCopyTimeout = 0;
-                    bulkCopy.BatchSize = JsonImportBatchSize;
-                    foreach (DataColumn dc in buffer.Columns)
+                    bulkCopy.BatchSize = options.BatchSize;
+                    bulkCopy.NotifyAfter = options.BatchSize > 0 ? options.BatchSize : DefaultBatchSize;
+                    bulkCopy.SqlRowsCopied += (sender, e) => PostToConsole(string.Format("{0}: {1:N0}", label, e.RowsCopied));
+                    foreach (var column in bulkColumns)
                     {
-                        bulkCopy.ColumnMappings.Add(dc.ColumnName, dc.ColumnName);
+                        bulkCopy.ColumnMappings.Add(column.Name, column.Name);
                     }
 
-                    using (var streamReader = new StreamReader(filePath))
-                    using (var json = new JsonTextReader(streamReader))
+                    using (StreamReader text = FileCompression.OpenText(filePath))
+                    using (var reader = new JsonRowReader(text, bulkColumns.Select(c => c.Name).ToList(), bulkColumns.Select(c => c.Type).ToList()))
                     {
-                        json.DateParseHandling = DateParseHandling.None;
-                        json.FloatParseHandling = FloatParseHandling.Decimal;
-
-                        if (!json.Read() || json.TokenType != JsonToken.StartArray)
-                        {
-                            throw new InvalidDataException("Expected a JSON array of row objects.");
-                        }
-
-                        while (json.Read() && json.TokenType != JsonToken.EndArray)
-                        {
-                            if (json.TokenType != JsonToken.StartObject)
-                            {
-                                throw new InvalidDataException(string.Format("Expected a row object at line {0}.", json.LineNumber));
-                            }
-
-                            DataRow row = buffer.NewRow();
-                            while (json.Read() && json.TokenType != JsonToken.EndObject)
-                            {
-                                string property = (string)json.Value;
-                                if (ordinals.TryGetValue(property, out int ordinal))
-                                {
-                                    row[ordinal] = ReadJsonValue(json, buffer.Columns[ordinal].DataType);
-                                }
-                                else
-                                {
-                                    json.Read();
-                                    json.Skip();
-                                }
-                            }
-                            buffer.Rows.Add(row);
-                            rows++;
-
-                            if (buffer.Rows.Count >= JsonImportBatchSize)
-                            {
-                                bulkCopy.WriteToServer(buffer);
-                                buffer.Clear();
-                                PostToConsole(string.Format("{0}: {1:N0}", label, rows));
-                            }
-                        }
-                    }
-
-                    if (buffer.Rows.Count > 0)
-                    {
-                        bulkCopy.WriteToServer(buffer);
-                        buffer.Clear();
+                        bulkCopy.WriteToServer(reader);
+                        rows = reader.RowCount;
                     }
                 }
 
@@ -319,10 +314,10 @@ ORDER BY c.column_id;";
             return columns;
         }
 
-        /// <summary>Creates an empty DataTable whose column types match the bulk copy destination.</summary>
-        private static DataTable CreateBuffer(SqlConnection conn, string bulkTarget, List<ImportColumn> columns)
+        /// <summary>Names and .NET types of the bulk copy destination's columns (what JSON values are converted to).</summary>
+        private static List<(string Name, Type Type)> GetBulkColumns(SqlConnection conn, string bulkTarget, List<ImportColumn> columns)
         {
-            var buffer = new DataTable();
+            var result = new List<(string Name, Type Type)>();
             string sql = "SELECT TOP (0) " + string.Join(", ", columns.Select(c => QuoteName(c.Name))) + " FROM " + bulkTarget + ";";
             using (var cmd = new SqlCommand(sql, conn))
             using (var reader = cmd.ExecuteReader())
@@ -331,10 +326,10 @@ ORDER BY c.column_id;";
                 {
                     // decimal(p > 28) values may not fit System.Decimal, so decimal columns are buffered as SqlDecimal.
                     Type type = reader.GetFieldType(i);
-                    buffer.Columns.Add(reader.GetName(i), IsSqlDecimalType(reader.GetDataTypeName(i)) ? typeof(SqlDecimal) : type);
+                    result.Add((reader.GetName(i), IsSqlDecimalType(reader.GetDataTypeName(i)) ? typeof(SqlDecimal) : type));
                 }
             }
-            return buffer;
+            return result;
         }
 
         /// <summary>Parses decimal text exactly (up to 38 digits); exponent notation goes through System.Decimal.</summary>

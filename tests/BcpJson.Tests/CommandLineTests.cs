@@ -203,6 +203,38 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Compression_is_off_by_default_and_gzip_is_fastest()
+        {
+            ExportOptions plain = Parsed<ExportOptions>("export", "--source-database", "Sales");
+            Assert.Equal("none", plain.Compress);
+            Assert.Equal("fastest", plain.CompressionLevel);
+            Assert.Null(plain.GzipLevel);
+            Assert.Equal("dbo.T.json", plain.DataFileName("dbo.T", ".json"));
+
+            ExportOptions gzip = Parsed<ExportOptions>("export", "--source-database", "Sales", "--compress", "gzip");
+            Assert.Equal(System.IO.Compression.CompressionLevel.Fastest, gzip.GzipLevel);
+            Assert.Equal("dbo.T.bcp.gz", gzip.DataFileName("dbo.T", ".bcp"));
+
+            ExportOptions smallest = Parsed<ExportOptions>("export", "--source-database", "Sales", "--compress", "gzip", "--compression-level", "smallest");
+            Assert.Equal(System.IO.Compression.CompressionLevel.SmallestSize, smallest.GzipLevel);
+        }
+
+        [Fact]
+        public void Options_built_in_code_default_to_uncompressed_and_default_batches()
+        {
+            // copy builds ExportOptions/ImportOptions itself for its bcp fallback, without the parser's defaults.
+            Assert.Null(new ExportOptions().GzipLevel);
+            Assert.Equal(Program.DefaultBatchSize, new ImportOptions().BatchSize);
+        }
+
+        [Fact]
+        public void Import_batch_size_defaults_to_50000()
+        {
+            Assert.Equal(50000, Parsed<ImportOptions>("import", "--file-format", "json", "--source-file", "*.json").BatchSize);
+            Assert.Equal(0, Parsed<ImportOptions>("import", "--file-format", "json", "--source-file", "*.json", "--batch-size", "0").BatchSize);
+        }
+
+        [Fact]
         public void Resume_is_opt_in()
         {
             Assert.False(Parsed<ExportOptions>("export", "--source-database", "Sales").Resume);
