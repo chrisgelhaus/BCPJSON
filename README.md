@@ -25,7 +25,7 @@ After reading about how Facebook backs up its MySQL fleet at scale — and, just
 - **Fast loads by default:** imports and copies take a table lock (`TABLOCK`), which allows minimal logging. Opt out with `--no-table-lock` — see [Table locking](#table-locking).
 - **Point-in-time exports:** `--snapshot` reads every table from a database snapshot, so a long export or copy reflects one moment — see [Consistent point-in-time exports](#consistent-point-in-time-exports).
 - **Resilient runs:** transient failures (network drops, failovers, throttling) are retried; export files only appear under their real names once complete; every export writes a manifest with each file's SHA-256, can be checked later with `verify`, and an interrupted export continues with `--resume` — see [Resilience](#resilience).
-- **Compression:** `--compress gzip` writes `.json.gz` / `.bcp.gz` files, typically 5-10 times smaller; import reads them directly — see [Compressed exports](#compressed-exports).
+- **Compression:** `--compress gzip` writes `.json.gz` / `.bcp.gz` files, several times smaller (3.2 times on the CI test data); import reads them directly — see [Compressed exports](#compressed-exports).
 - **Streaming JSON import:** rows go from the file straight into the bulk load, so memory use stays flat however large the table.
 - Windows Authentication by default; SQL logins supported.
 - Exit code `0` on success, `1` if anything reported an error — suitable for scheduled jobs.
@@ -448,7 +448,7 @@ bcpjson export --source-database Sales --file-format bcp --export-path D:\archiv
 - The manifest records `"compression": "gzip"` and the size and SHA-256 of the `.gz` files, so `verify` works the same. `--resume` refuses to continue an export with a different `--compress` setting.
 - `gzip` was chosen because every platform can read it without bcpJson: `zcat`, `gzip -d`, 7-Zip, `tar`. To diff two compressed exports, decompress them first, for example `diff <(zcat a/dbo.T.json.gz) <(zcat b/dbo.T.json.gz)`.
 
-**Which level?** `fastest` (the default) gets most of the reduction: row-per-line JSON usually shrinks 5-10 times. It is fast enough not to slow down an export. `optimal` saves a little more space for noticeably more CPU, and `smallest` more again; use them for archives written once and kept long.
+**Which level?** `fastest` (the default) gets most of the reduction and is fast enough not to slow down an export. How much a file shrinks depends on the data: repetitive JSON (the same property names on every row, many similar values) compresses best. The CI test data, which is deliberately varied, shrinks 3.2 times. `optimal` saves a little more space for noticeably more CPU, and `smallest` more again; use them for archives written once and kept long.
 
 **Why compression is off by default.** Plain files can be diffed line by line, opened in any editor and read by any tool. That was the point of bcpJson's format, and existing scripts expect `.json` and `.bcp` names. Turn it on when disk space or copy time matters more.
 
