@@ -33,6 +33,7 @@ namespace bcpJson
             if (setting.DropTarget)
             {
                 DropForeignKeysOwnedBy(setting, tables);
+                DropTargetTables(setting, tables);
             }
 
             var createdTables = new ConcurrentBag<TableRef>();
@@ -119,6 +120,39 @@ WHERE s.name = @schema AND t.name = @table;";
             if (dropped > 0)
             {
                 PostToConsole(string.Format("Dropped {0} foreign key(s) on target tables that will be recreated (--drop-target).", dropped));
+            }
+        }
+
+        /// <summary>
+        /// --drop-target: drops the existing target tables one at a time before the parallel copy starts. Dropping
+        /// them concurrently deadlocks on SQL Server 2019 (the drops lock shared metadata such as dependent triggers),
+        /// and a deadlock victim would leave its table uncopied. The parallel copy then only creates tables.
+        /// </summary>
+        private static void DropTargetTables(CopyOptions setting, List<TableRef> tables)
+        {
+            using (var conn = SqlConnectionFactory.Create(setting.TargetConnectionString()))
+            {
+                conn.Open();
+                foreach (TableRef table in tables)
+                {
+                    try
+                    {
+                        using (var cmd = new SqlCommand("SELECT CASE WHEN OBJECT_ID(@name, N'U') IS NULL THEN 0 ELSE 1 END;", conn))
+                        {
+                            cmd.Parameters.Add("@name", SqlDbType.NVarChar, 520).Value = table.QuotedName;
+                            if ((int)cmd.ExecuteScalar() == 0)
+                            {
+                                continue;
+                            }
+                        }
+                        PostToConsole(string.Format("{0}: Target table exists. Dropping.", table.DisplayName));
+                        ExecuteSql(conn, "DROP TABLE " + table.QuotedName + ";");
+                    }
+                    catch (Exception ex)
+                    {
+                        PostToConsole(string.Format("{0}: Could not drop the target table: {1}", table.DisplayName, ex.Message), InfoLevel.Error);
+                    }
+                }
             }
         }
 

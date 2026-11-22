@@ -34,7 +34,7 @@ After reading about how Facebook backs up its MySQL fleet at scale — and, just
 
 - Windows (x64 or Arm64) or Linux (x64). Release downloads are self-contained: no .NET install needed. Building from source needs the [.NET 8 SDK](https://dotnet.microsoft.com/download).
 - For `--file-format bcp` and for `copy` of tables with geography/geometry/hierarchyid columns: the SQL Server **bcp utility** on `PATH` (installed with SQL Server or the *Microsoft Command Line Utilities for SQL Server*).
-- SQL Server 2008 or later. `--snapshot` needs SQL Server 2016 SP1 or later (any edition) and is not available on Azure SQL Database.
+- SQL Server 2008 or later; every release is tested against SQL Server 2019, 2022 and 2025. `--snapshot` needs SQL Server 2016 SP1 or later (any edition) and is not available on Azure SQL Database.
 
 ## Install
 
