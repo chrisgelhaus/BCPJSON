@@ -43,13 +43,15 @@ SOURCE=(--source-server "$SQL_SERVER" --source-login "$SQL_USER" --source-passwo
 TARGET=(--target-server "$SQL_SERVER" --target-login "$SQL_USER" --target-password "$SQL_PASSWORD")
 
 # Runs bcpjson; the command line is echoed with the password masked. A non-zero exit fails the script.
+# verify needs no server, so it gets no --trust-server-certificate.
 bcpjson() {
-    local shown="$*"
+    local shown="$*" extra=(--trust-server-certificate)
     echo "+ bcpjson ${shown//"$SQL_PASSWORD"/***}"
+    [ "$1" = verify ] && extra=()
     if [[ "$BCPJSON" == *.dll ]]; then
-        dotnet "$BCPJSON" "$@" --trust-server-certificate
+        dotnet "$BCPJSON" "$@" "${extra[@]}"
     else
-        "$BCPJSON" "$@" --trust-server-certificate
+        "$BCPJSON" "$@" "${extra[@]}"
     fi
 }
 

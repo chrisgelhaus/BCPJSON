@@ -108,6 +108,14 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Connections_are_always_encrypted()
+        {
+            var builder = new SqlConnectionStringBuilder(SqlConnectionFactory.Build("srv", "db", "", "", false, true));
+            Assert.Equal(SqlConnectionEncryptOption.Mandatory, builder.Encrypt);
+            Assert.True(builder.TrustServerCertificate);
+        }
+
+        [Fact]
         public void Connections_get_a_retry_provider()
         {
             using (SqlConnection conn = SqlConnectionFactory.Create("Server=localhost"))

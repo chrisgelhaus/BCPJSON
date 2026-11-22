@@ -16,6 +16,8 @@ namespace bcpJson
                 InitialCatalog = string.IsNullOrEmpty(database) ? "master" : database,
                 ApplicationIntent = readOnly ? ApplicationIntent.ReadOnly : ApplicationIntent.ReadWrite,
                 ApplicationName = "bcpJson",
+                // SqlClient's default, stated explicitly: always encrypt (--trust-server-certificate only skips validation).
+                Encrypt = SqlConnectionEncryptOption.Mandatory,
                 TrustServerCertificate = trustServerCertificate,
                 // Without this, a failed open makes the pool rethrow the cached error for up to a minute without
                 // contacting the server, so connection retries could never succeed.
