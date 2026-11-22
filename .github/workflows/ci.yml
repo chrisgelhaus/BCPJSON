@@ -53,8 +53,14 @@ jobs:
           if-no-files-found: ignore
 
   integration:
-    name: Round trip against SQL Server 2022
+    # Branch protection requires these checks by name ("Round trip against SQL Server 2022" etc.);
+    # renaming the job or a version means updating the required checks too.
+    name: Round trip against SQL Server ${{ matrix.sql }}
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        sql: ["2019", "2022", "2025"]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -66,7 +72,7 @@ jobs:
       # roundtrip.sh writes to $RUNNER_TEMP/bcpjson-roundtrip
     services:
       mssql:
-        image: mcr.microsoft.com/mssql/server:2022-latest
+        image: mcr.microsoft.com/mssql/server:${{ matrix.sql }}-latest
         env:
           ACCEPT_EULA: "Y"
           MSSQL_SA_PASSWORD: BcpJson-CI-2026x
@@ -140,6 +146,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: roundtrip-output
+          name: roundtrip-output-sql${{ matrix.sql }}
           path: ${{ runner.temp }}/bcpjson-roundtrip
           retention-days: 7
