@@ -32,7 +32,12 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
   - **Atomic files:** exports write `<file>.partial` and rename when complete; import ignores `.partial` files.
   - **Manifest + verify + resume:** `bcpjson-manifest.json` per export (tool, format, server, database, snapshot, start/completion, per-table rows and file size/SHA-256), saved after every table. New `verify` verb checks a folder against it without a database. `export --resume` skips tables already intact (same format/database/query required).
   - CI: `roundtrip.sh resilience` checks the manifest, catches a same-size edit and a missing file with `verify`, resumes a simulated crash (skipped files untouched, no `.partial` left, data identical), refuses a mismatched resume, and proves connection retry by renaming a database into place 20 s after the export starts (SqlClient's own single login retry after 10 s is not enough) (control: `--retries 0` fails). BCP and snapshot exports are verified too.
-- Remaining ideas from that review: `SqlBulkCopy` column order hints, SQL Server 2019/2025 in CI, linux-arm64/macOS builds, SRID-preserving spatial JSON.
+- Remaining ideas from that review: `SqlBulkCopy` column order hints, linux-arm64/macOS builds, SRID-preserving spatial JSON.
+
+## Done after v2.5.0
+
+- CI integration job runs on SQL Server 2019, 2022 and 2025 (matrix over `mcr.microsoft.com/mssql/server:<version>-latest`; first run: 2019 CU32, 2022 CU28, 2025 CU11). The job name for 2022 is unchanged, so the existing required check still applies.
+- Found by 2019: `copy --drop-target` dropped target tables in parallel, the drops deadlocked and the victims were not copied. Target tables are now dropped one at a time (`DropTargetTables`) before the parallel copy.
 
 ## Done after v2.4.0 (released in v2.5.0)
 
@@ -93,7 +98,7 @@ Deferred on 2026-11-22. Sign-in with Microsoft Entra ID for Azure SQL Database, 
 - Loads take a table lock by default (fastest; minimal logging); opting out is explicit.
 - Point-in-time exports are opt-in (`--snapshot`) because they need CREATE DATABASE permission and are unavailable on Azure SQL DB.
 
-- CI/testing runs on GitHub Actions (repo is public, so standard runners are free). SQL Server for integration tests = service container (`mcr.microsoft.com/mssql/server:2022-latest`).
+- CI/testing runs on GitHub Actions (repo is public, so standard runners are free). SQL Server for integration tests = service containers (`mcr.microsoft.com/mssql/server:2019-latest`, `2022-latest`, `2025-latest`).
 - Releases are published as GitHub Releases from version tags.
 - No local SQL Server on the dev machine; all database testing happens in GitHub Actions.
 - All changes reach `master` through a PR with green CI (branch protection, step 6).
