@@ -25,7 +25,7 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 
 - 38-digit decimals: JSON export used to fail (`OverflowException`) on `decimal`/`numeric` values beyond System.Decimal (28-29 significant digits or scale > 28). Values that fit are written exactly as before (existing exports unchanged); larger ones are written from `SqlDecimal` text. JSON import buffers decimal columns as `SqlDecimal` and parses the number text, so all digits survive. CI: `plain.Decimals` (max/min of decimal(38,0), (38,10), (38,19), (38,38), (29,2), the 2^96 boundary) round-trips through JSON, BCP and copy, checked with a hash of SQL Server's own text (`compare_decimals`), not only via bcpjson exports.
 
-## Done after v2.3.1
+## Done after v2.3.1 (released in v2.4.0)
 
 - Resilience (improvements 1-3 from the 2026-11-21 review):
   - **Retries:** `--retries` (default 3) on every verb. Connection opens retry transient errors via SqlClient's exponential retry provider (`SqlConnectionFactory.Create`; `PoolBlockingPeriod=NeverBlock`). Table exports (JSON and BCP) are retried as a whole; query exports, import and copy loads are not (not idempotent).
@@ -36,7 +36,7 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 
 ## Releases
 
-- v2.0.0 (2026-11-20): first tagged release. v2.0.1: SqlClient 7, SMO 181, SqlServer.Types 170. **v2.1.0** (2026-11-21, `c154790`): copy recreates keys and indexes; BCP import fix below. **v2.2.0** (`0a172f5`): `copy --foreign-keys`, snapshot consistency test. **v2.3.0** (2026-11-21, `03fd363`): copy recreates check constraints (default on) and triggers (`--triggers`). **v2.3.1** (2026-11-21, `5b37f35`): JSON export/import keep all 38 digits of `decimal`/`numeric` (export used to fail beyond 28-29 digits).
+- v2.0.0 (2026-11-20): first tagged release. v2.0.1: SqlClient 7, SMO 181, SqlServer.Types 170. **v2.1.0** (2026-11-21, `c154790`): copy recreates keys and indexes; BCP import fix below. **v2.2.0** (`0a172f5`): `copy --foreign-keys`, snapshot consistency test. **v2.3.0** (2026-11-21, `03fd363`): copy recreates check constraints (default on) and triggers (`--triggers`). **v2.3.1** (2026-11-21, `5b37f35`): JSON export/import keep all 38 digits of `decimal`/`numeric` (export used to fail beyond 28-29 digits). **v2.4.0** (2026-11-21, `bb075a3`): `--retries` (connection and table-export retries), atomic `.partial` export files, `bcpjson-manifest.json` with the new `verify` verb and `export --resume`.
 
 ## Done in v2.1.0 (PR #28)
 
