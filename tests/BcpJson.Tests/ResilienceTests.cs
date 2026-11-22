@@ -118,7 +118,7 @@ namespace bcpJson.Tests
         [Fact]
         public void Connections_get_a_retry_provider()
         {
-            using (SqlConnection conn = SqlConnectionFactory.Create("Server=localhost"))
+            using (SqlConnection conn = SqlConnectionFactory.Create(SqlConnectionFactory.Build("localhost", "db", "", "", false, false)))
             {
                 Assert.NotNull(conn.RetryLogicProvider);
             }

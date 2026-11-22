@@ -355,15 +355,16 @@ case "${1:-}" in
         fi
         grep -q "Cannot resume: the existing export is json, not bcp" "$WORK/resume-conflict.log" || { cat "$WORK/resume-conflict.log"; exit 1; }
 
-        # 4. Connection retry: the database only appears (renamed into place, with its table) a few seconds after the
-        #    export starts; until then opening it fails with error 4060, which is transient.
+        # 4. Connection retry: the database only appears (renamed into place, with its table) 20 s after the export
+        #    starts; until then opening it fails with error 4060, which is transient. SqlClient itself retries a login
+        #    once after 10 s (ConnectRetryCount=1), so 20 s ensures bcpjson's own retries are what make it succeed.
         sql -Q "DROP DATABASE IF EXISTS BcpJsonLate; DROP DATABASE IF EXISTS BcpJsonLateStaging; CREATE DATABASE BcpJsonLateStaging;"
         sql -d BcpJsonLateStaging -Q "CREATE TABLE dbo.T (Id INT NOT NULL PRIMARY KEY); INSERT dbo.T VALUES (1), (2);"
         if bcpjson export "${SOURCE[@]}" --source-database BcpJsonLate --file-format json --export-path "$WORK/late-noretry" --retries 0 > "$WORK/late-noretry.log" 2>&1; then
             echo "::error::Control failed: the export succeeded although the database does not exist yet"; exit 1
         fi
         echo "Without retries the export fails at once: $(grep -m1 'Cannot connect' "$WORK/late-noretry.log")"
-        (sleep 5; sql -Q "ALTER DATABASE BcpJsonLateStaging MODIFY NAME = BcpJsonLate;" > /dev/null) &
+        (sleep 20; sql -Q "ALTER DATABASE BcpJsonLateStaging MODIFY NAME = BcpJsonLate;" > /dev/null) &
         renamer=$!
         bcpjson export "${SOURCE[@]}" --source-database BcpJsonLate --file-format json --export-path "$WORK/late" --retries 8 | tee "$WORK/late.log"
         wait "$renamer"
