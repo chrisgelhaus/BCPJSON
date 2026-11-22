@@ -28,11 +28,12 @@ namespace bcpJson
             // writes requested help and version to stdout instead, and only real usage errors to stderr.
             using (var parser = new Parser(settings => settings.HelpWriter = null))
             {
-                ParserResult<object> result = parser.ParseArguments<ExportOptions, ImportOptions, CopyOptions>(args);
+                ParserResult<object> result = parser.ParseArguments<ExportOptions, ImportOptions, CopyOptions, VerifyOptions>(args);
                 return result.MapResult(
                     (ExportOptions opts) => ExportData(opts),
                     (ImportOptions opts) => ImportData(opts),
                     (CopyOptions opts) => CopyData(opts),
+                    (VerifyOptions opts) => VerifyExport(opts),
                     errors => ReportParseErrors(result, errors, Console.Out, Console.Error));
             }
         }
@@ -75,6 +76,12 @@ namespace bcpJson
                 return 1;
             }
 
+            ExportManifest manifest = OpenManifest(opts, format);
+            if (manifest == null)
+            {
+                return 1;
+            }
+
             Stopwatch sw = Stopwatch.StartNew();
             DatabaseSnapshot snapshot = null;
             long result;
@@ -92,11 +99,11 @@ namespace bcpJson
 
                 if (format == "bcp")
                 {
-                    result = opts.IsQueryExport ? ExportQueryToBCP(opts) : ExportToBCP(opts);
+                    result = opts.IsQueryExport ? ExportQueryToBCP(opts, manifest) : ExportToBCP(opts, manifest);
                 }
                 else
                 {
-                    result = opts.IsQueryExport ? ExportQueryToJSON(opts) : ExportToJSON(opts);
+                    result = opts.IsQueryExport ? ExportQueryToJSON(opts, manifest) : ExportToJSON(opts, manifest);
                 }
             }
             finally
@@ -104,8 +111,81 @@ namespace bcpJson
                 snapshot?.Dispose();
             }
             sw.Stop();
+
+            if (ExitCode() == 0)
+            {
+                // Completed marks the export as whole; verify reports an export without it as incomplete.
+                manifest.Completed = DateTime.UtcNow;
+                try
+                {
+                    manifest.Save(opts.exportPath);
+                }
+                catch (Exception ex)
+                {
+                    PostToConsole(string.Format("Could not write {0}: {1}", ExportManifest.FileName, ex.Message), InfoLevel.Error);
+                }
+            }
+            else
+            {
+                PostToConsole("The export is incomplete; rerun with --resume to export only what is missing.", InfoLevel.Warning);
+            }
             PostToConsole(string.Format("Total Exported: {0:N0}\tRows in {1}", result, sw.Elapsed), errorCount > 0 ? InfoLevel.Warning : InfoLevel.Success);
             return ExitCode();
+        }
+
+        /// <summary>
+        /// The manifest this export records into: the existing one with --resume (after checking it describes the same
+        /// export), otherwise a new one. Saved immediately, so even an export that fails at once leaves an
+        /// (incomplete) manifest. Null after reporting an error.
+        /// </summary>
+        private static ExportManifest OpenManifest(ExportOptions opts, string format)
+        {
+            try
+            {
+                if (opts.Resume)
+                {
+                    ExportManifest existing = ExportManifest.Load(opts.exportPath);
+                    if (existing == null)
+                    {
+                        PostToConsole(string.Format("--resume: no {0} in {1}; exporting everything.", ExportManifest.FileName, opts.exportPath), InfoLevel.Warning);
+                    }
+                    else
+                    {
+                        string conflict = existing.ResumeConflict(format, opts.srcDatabase, opts.Query);
+                        if (conflict != null)
+                        {
+                            PostToConsole(string.Format("Cannot resume: {0}. Use another --export-path, or export without --resume.", conflict), InfoLevel.Error);
+                            return null;
+                        }
+                        if (opts.Snapshot)
+                        {
+                            PostToConsole("--resume with --snapshot: tables exported by the earlier run come from an earlier point in time.", InfoLevel.Warning);
+                        }
+                        existing.Tool = ExportManifest.ToolVersion();
+                        existing.Completed = null;
+                        existing.Save(opts.exportPath);
+                        return existing;
+                    }
+                }
+
+                var manifest = new ExportManifest
+                {
+                    Tool = ExportManifest.ToolVersion(),
+                    Format = format,
+                    Server = opts.srcServer,
+                    Database = opts.srcDatabase,
+                    Query = opts.Query,
+                    Snapshot = opts.Snapshot,
+                    Started = DateTime.UtcNow
+                };
+                manifest.Save(opts.exportPath);
+                return manifest;
+            }
+            catch (Exception ex)
+            {
+                PostToConsole(string.Format("{0} in {1}: {2}", ExportManifest.FileName, opts.exportPath, ex.Message), InfoLevel.Error);
+                return null;
+            }
         }
 
         private static int ImportData(ImportOptions opts)

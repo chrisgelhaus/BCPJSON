@@ -112,7 +112,7 @@ namespace bcpJson
         private static List<TableRef> GetSourceTables(string connectionString, string objectListSql)
         {
             var tables = new List<TableRef>();
-            using (var conn = new SqlConnection(connectionString))
+            using (var conn = SqlConnectionFactory.Create(connectionString))
             {
                 conn.Open();
                 using (var cmd = new SqlCommand(objectListSql, conn))
@@ -143,7 +143,7 @@ FROM sys.tables t
 WHERE t.type = 'U'
       AND (s.name + N'.' + t.name = @name OR t.object_id = OBJECT_ID(@name));";
 
-            using (var conn = new SqlConnection(connectionString))
+            using (var conn = SqlConnectionFactory.Create(connectionString))
             {
                 conn.Open();
                 using (var cmd = new SqlCommand(sql, conn))

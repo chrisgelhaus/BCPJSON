@@ -60,6 +60,12 @@ namespace bcpJson
         [Option("snapshot", Default = false, Required = false, HelpText = "Export from a database snapshot of the source so every table reflects the same point in time, however long the export runs. Needs CREATE DATABASE permission and SQL Server 2016 SP1+ (any edition); the snapshot is dropped afterwards.")]
         public bool Snapshot { get; set; }
 
+        [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries after a transient failure (network error, failover, throttling), with exponential backoff. Applies to opening connections and to exporting a table, which is redone from the start. --source-query exports are not retried. 0 = no retries.")]
+        public int Retries { get; set; }
+
+        [Option("resume", Default = false, Required = false, HelpText = "Continue an interrupted export into the same --export-path: tables already recorded in its bcpjson-manifest.json with their files intact are skipped. Must use the same --file-format, --source-database and --source-query.")]
+        public bool Resume { get; set; }
+
         public bool IsQueryExport
         {
             get { return !string.IsNullOrEmpty(this.Query); }
@@ -80,6 +86,11 @@ namespace bcpJson
             if (string.IsNullOrEmpty(this.Query) && string.IsNullOrEmpty(this.srcDatabase))
             {
                 Program.PostToConsole("Specify --source-database (table export) or --source-query (query export).", Program.InfoLevel.Error);
+                return false;
+            }
+
+            if (!SqlConnectionFactory.ApplyRetries(this.Retries))
+            {
                 return false;
             }
 

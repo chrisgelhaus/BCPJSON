@@ -54,9 +54,18 @@ namespace bcpJson
                 tableArg, Arg(dataFile), Arg(formatFile), connectionArgs, splittable ? " -q" : string.Empty, BcpLoadHints(noTableLock), Arg(errorLog));
         }
 
+        /// <summary>False for the export manifest and for unfinished ".partial" files, which a wildcard like *.json or * may match.</summary>
+        internal static bool IsImportableFile(string name)
+        {
+            return !name.Equals(ExportManifest.FileName, StringComparison.OrdinalIgnoreCase)
+                && !name.EndsWith(PartialSuffix, StringComparison.OrdinalIgnoreCase);
+        }
+
         private static FileInfo[] FindSourceFiles(ImportOptions options)
         {
-            FileInfo[] files = new DirectoryInfo(options.SourcePath).GetFiles(options.SourceFile, SearchOption.TopDirectoryOnly);
+            FileInfo[] files = new DirectoryInfo(options.SourcePath).GetFiles(options.SourceFile, SearchOption.TopDirectoryOnly)
+                .Where(f => IsImportableFile(f.Name))
+                .ToArray();
             if (files.Length == 0)
             {
                 PostToConsole(string.Format("No files matching '{0}' in {1}.", options.SourceFile, options.SourcePath), InfoLevel.Warning);
@@ -97,7 +106,7 @@ namespace bcpJson
 
                     if (options.TruncateTarget)
                     {
-                        using (var conn = new SqlConnection(connectionString))
+                        using (var conn = SqlConnectionFactory.Create(connectionString))
                         {
                             conn.Open();
                             ExecuteSql(conn, "TRUNCATE TABLE " + qualifiedName + ";");
@@ -170,7 +179,7 @@ namespace bcpJson
             string qualifiedName = QuoteName(target[0]) + "." + QuoteName(target[1]);
             string label = target[0] + "." + target[1];
 
-            using (var conn = new SqlConnection(connectionString))
+            using (var conn = SqlConnectionFactory.Create(connectionString))
             {
                 conn.Open();
 

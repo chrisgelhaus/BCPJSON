@@ -1,4 +1,4 @@
-# CLAUDE.md
+﻿# CLAUDE.md
 
 This file gives Claude Code guidance for working in this repository.
 
@@ -20,7 +20,7 @@ dotnet publish src/BcpJson -c Release -r win-x64 -o publish  # self-contained si
 ```
 
 - Target framework: `net8.0`. Assembly name `bcpjson`; debug output `src/BcpJson/bin/Debug/net8.0/bcpjson.dll` (used by `.vscode/launch.json`).
-- **CI:** `.github/workflows/ci.yml` builds with warnings as errors and runs unit tests on Ubuntu and Windows, then an Ubuntu integration job against a SQL Server 2022 service container runs `tests/integration/roundtrip.sh` (`setup`, `json`, `bcp`, `copy`, `snapshot`) against the published linux-x64 single-file executable: it builds `BcpJsonSource` from `schema.sql` + `data.sql` and diffs JSON exports after each round trip. Add awkward data there when fixing a data-fidelity bug. The scripts can be run against any SQL Server with `SQL_SERVER`, `SQL_PASSWORD` and `BCPJSON` set.
+- **CI:** `.github/workflows/ci.yml` builds with warnings as errors and runs unit tests on Ubuntu and Windows, then an Ubuntu integration job against a SQL Server 2022 service container runs `tests/integration/roundtrip.sh` (`setup`, `json`, `bcp`, `copy`, `snapshot`, `consistency`, `resilience`) against the published linux-x64 single-file executable: it builds `BcpJsonSource` from `schema.sql` + `data.sql` and diffs JSON exports after each round trip. Add awkward data there when fixing a data-fidelity bug. The scripts can be run against any SQL Server with `SQL_SERVER`, `SQL_PASSWORD` and `BCPJSON` set.
 - **Releases:** `.github/workflows/release.yml` runs on `v*` tags that are on master: it reruns ci.yml (`workflow_call`), publishes and smoke-tests win-x64, win-arm64 (`windows-11-arm` runner) and linux-x64, then creates the GitHub Release with packages, `SHA256SUMS` and a provenance attestation. Manual runs are dry runs (artifacts only). The version comes from the tag via `-p:Version`; the csproj `<Version>` is only the development default.
 - **Security & dependencies:** Dependabot (`.github/dependabot.yml`) opens weekly update PRs; they merge only with green CI like any other PR. CodeQL runs as GitHub's default setup (no workflow file). Secret scanning push protection is on. Vulnerability reports come in privately per `SECURITY.md`.
 - **Runtime prerequisite:** `bcp` (Windows `bcp.exe`, or mssql-tools18 on Linux) must be on `PATH` for the BCP export/import paths and for copying tables with CLR-type columns. Windows Auth is the default when no login/password is given.
@@ -33,8 +33,11 @@ dotnet publish src/BcpJson -c Release -r win-x64 -o publish  # self-contained si
 | `export` | `ExportOptions.cs` | `ExportData` → `ExportToBCP` / `ExportToJSON` / `ExportQueryTo*` | `--file-format bcp\|json`, table/schema include/exclude filters (`*` wildcards; no include filter = all user tables), `--source-query` + `--output-name`, `--nolock` |
 | `import` | `ImportOptions.cs` | `ImportData` → `ImportFromBCP` / `ImportFromJSON` | Target table must exist. JSON import streams with `JsonTextReader` + `SqlBulkCopy`; CLR-type columns go through a `#bcpjson_stage` temp table and `::Parse()`. BCP import uses the `<schema>.<table>-c.fmt` format file (falls back to legacy `-c.xml`) with `-E -k` plus `-q` (QUOTED_IDENTIFIER ON, required for tables with filtered/XML/spatial indexes) via `BcpInArguments`: with `-q` bcp needs the name unbracketed as `schema.table`, table first and direction second. |
 | `copy` | `CopyOptions.cs` | `CopyData` → `BulkCopyTables` → `CopyTable` | SMO creates/drops/truncates the target, `SqlBulkCopy` moves data; tables with geography/geometry/hierarchyid fall back to bcp export+import via a temp folder. On tables it created, `CreateTargetIndexes` then scripts every source index with SMO (`NoFileGroup`) in `IndexCreationRank` order; `--no-indexes` skips it. `CreateTargetCheckConstraints` follows per table (`--no-check-constraints` skips it). With `--foreign-keys`, `CreateTargetForeignKeys` scripts the FKs of all created tables after the parallel loop, one at a time; `--drop-target` first runs `DropForeignKeysOwnedBy` so re-runs aren't blocked. `--triggers` runs `CreateTargetTriggers` last (enabled state and `sp_settriggerorder` applied explicitly). |
+| `verify` | `VerifyOptions.cs` | `VerifyExport` → `CheckExport` | No database. Checks every file of `bcpjson-manifest.json` (exists, size, SHA-256) and that `completed` is set; unlisted data files and `.partial` leftovers are warnings. |
 
 All verbs share `--trust-server-certificate`, `--log-file` and `--max-tasks` (via `Parallelism()`). Loads (JSON/BCP import, copy) use TABLOCK by default through `LoadOptions()` / `BcpLoadHints()`; `--no-table-lock` turns it off. `export` and `copy` take `--snapshot`: `CreateSnapshot()` makes a database snapshot, `srcDatabase` is swapped to it (so connection strings, bcp args and SMO all follow), and it is dropped in a `finally`. `Main` returns exit code 1 if any `InfoLevel.Error` message was posted.
+
+**Resilience:** every connection comes from `SqlConnectionFactory.Create()`, which attaches SqlClient's exponential retry provider for `Open()` (`--retries`, default 3, set via `ApplyRetries` in each `Valid()`; `PoolBlockingPeriod=NeverBlock` so retries really reach the server). Commands are never retried by SqlClient. Table exports (JSON and BCP, idempotent) are additionally wrapped in `WithRetries` (transient SQL errors / any bcp failure); query exports, imports and copy loads are not. Exports write `<file>.partial` and `CommitPartial` renames on success (`DiscardPartial` on failure). `ExportData` opens an `ExportManifest` (new, or the existing one with `--resume` after `ResumeConflict`), each finished table is `Record`ed (saved atomically every time), and `Completed` is set only when the run had no errors. `TablesToExport` drops tables the manifest shows intact (size check) under `--resume`. Import skips the manifest and `.partial` files (`IsImportableFile`).
 
 ## Code layout
 
@@ -46,7 +49,10 @@ All verbs share `--trust-server-certificate`, `--log-file` and `--max-tasks` (vi
 - `Program.Copy.cs` — server-to-server copy.
 - `Program.Snapshot.cs` — `--snapshot`: `DatabaseSnapshot` (IDisposable, drops on dispose), `SnapshotName`, `SnapshotFilePath` (Windows/Linux server paths), `BuildCreateSnapshotSql`, `CreateSnapshot`.
 - `Program.Sql.cs` — `TableRef`, `BuildSourceObjectIDList` (filters → T-SQL), `GetSourceTables`, `GetTableObject`, `QuoteName`/`SqlLiteral`/`LikeLiteral`.
-- `SqlConnectionFactory.cs` — connection strings via `SqlConnectionStringBuilder`; `TryOpen` for validation.
+- `SqlConnectionFactory.cs` — connection strings via `SqlConnectionStringBuilder`; `Create` (connection with retry provider; always use it instead of `new SqlConnection`); `TryOpen` for validation.
+- `Program.Resilience.cs` — `WithRetries`, `IsTransientSqlError`, `RetryDelay`, `BcpFailedException`, `.partial` helpers.
+- `ExportManifest.cs` — `ExportManifest` / `ManifestTable` / `ManifestFile` (`bcpjson-manifest.json`, camelCase JSON, SHA-256 via `ManifestFile.Describe`).
+- `Program.Verify.cs` — the `verify` verb.
 - `SqlBulkCopyHelper.cs` — rows-copied via reflection (member name differs across SqlClient versions).
 - `CustomSelect.sql` — reference copy of `TableMetadataSql`; not loaded at runtime, keep in sync.
 

@@ -1,4 +1,4 @@
-# BCPJSON
+﻿# BCPJSON
 
 A fast, simple command-line tool for getting data **out of**, **into**, and **between** Microsoft SQL Server databases.
 
@@ -17,12 +17,14 @@ After reading about how Facebook backs up its MySQL fleet at scale — and, just
 | `export` | Writes each selected table to its own file, in **JSON** (via SqlClient) or native **BCP** character format (via the `bcp` utility). Can also export the result of a single `--source-query`. |
 | `import` | Loads JSON or BCP files produced by `export` back into existing tables. |
 | `copy` | Copies tables server-to-server with `SqlBulkCopy`, creating target tables if needed. |
+| `verify` | Checks an export folder against its manifest (sizes and SHA-256 of every file); no database needed. |
 
 - Tables are processed in parallel (`--max-tasks` limits how many at once).
 - Select tables with include/exclude lists for tables and schemas, with `*` wildcards. With no include filters, every user table is selected.
 - JSON exports are ordered by primary key (or by every sortable column if there is no PK), so repeated exports of unchanged data are identical.
 - **Fast loads by default:** imports and copies take a table lock (`TABLOCK`), which allows minimal logging. Opt out with `--no-table-lock` — see [Table locking](#table-locking).
 - **Point-in-time exports:** `--snapshot` reads every table from a database snapshot, so a long export or copy reflects one moment — see [Consistent point-in-time exports](#consistent-point-in-time-exports).
+- **Resilient runs:** transient failures (network drops, failovers, throttling) are retried; export files only appear under their real names once complete; every export writes a manifest with each file's SHA-256, can be checked later with `verify`, and an interrupted export continues with `--resume` — see [Resilience](#resilience).
 - Windows Authentication by default; SQL logins supported.
 - Exit code `0` on success, `1` if anything reported an error — suitable for scheduled jobs.
 
@@ -346,6 +348,74 @@ bcpjson copy --source-server PROD01 --source-database Sales `
   DROP DATABASE [Sales_bcpjson_20261120214450];
   ```
 
+## Resilience
+
+Long runs against busy or remote servers hit network drops, failovers and throttling. bcpJson is built to survive them, to never leave a half-written file that looks complete, and to let you check and finish an export later.
+
+### Retries for transient failures
+
+`--retries` (default `3`, `0` turns it off) applies to every verb:
+
+- **Opening a connection** is retried when SQL Server reports a transient error: network errors, deadlock victims, Azure SQL throttling and failover, or "cannot open database" while a database is coming online. The waits grow exponentially (about 1, 2, 4, 8 s, at most 30 s), and each retry is logged as a warning.
+- **Exporting a table** is retried as a whole when it fails with a transient error (JSON) or bcp fails (BCP; bcp reports no error numbers, so any failure is retried). Exporting only rewrites the table's file, so starting over is safe. Waits: 2, 4, 8, 16, then 30 s.
+- **Not retried:** `--source-query` exports (the query may be a procedure with side effects), and the data loads of `import` and `copy`. A load may have committed some batches before failing, and replaying it could duplicate rows. Rerun those with `--truncate-target` or `--drop-target` instead.
+
+```powershell
+# A flaky VPN link: allow more retries
+bcpjson export --source-server remote01 --source-database Sales --file-format json --export-path D:\dumps\sales --retries 8
+```
+
+### Complete files only
+
+Every export file is first written as `<name>.partial` and renamed to its real name only when it is complete (for BCP, the data and format files together). A crash, a killed process or a failed table never leaves a truncated `.json` or `.bcp` file behind. If an export fails, a file from an earlier export keeps its previous content. `import` ignores `.partial` files, and the next export overwrites them.
+
+### The export manifest
+
+Each export writes `bcpjson-manifest.json` into the export folder. It records the tool version, format, server, database (the real database, also with `--snapshot`), start and completion times, and for every table its row count and the size and SHA-256 of each file:
+
+```json
+{
+  "tool": "bcpjson 2.4.0+...",
+  "format": "json",
+  "server": "PROD01",
+  "database": "Sales",
+  "query": null,
+  "snapshot": true,
+  "started": "2026-11-21T02:00:00Z",
+  "completed": "2026-11-21T02:41:13Z",
+  "tables": [
+    {
+      "name": "Sales.Customer",
+      "rows": 19820,
+      "exported": "2026-11-21T02:00:04Z",
+      "files": [ { "name": "Sales.Customer.json", "bytes": 4120334, "sha256": "9f2c..." } ]
+    }
+  ]
+}
+```
+
+The manifest is saved after every table, so it always reflects what has finished. `completed` is set only when the whole export succeeded. `import` skips the manifest, so `--source-file "*.json"` still works.
+
+### Verifying an export
+
+`verify` checks an export folder against its manifest without touching a database. Every file must exist with its recorded size and SHA-256, and the export must have completed:
+
+```powershell
+bcpjson verify --path D:\dumps\sales
+```
+
+It exits `1` and names each problem: a missing file, a changed size or hash (corruption, an accidental edit, an incomplete copy to another disk), or an export that never completed. Extra `.json`/`.bcp` files the manifest doesn't list, for example tables left from an older export, and leftover `.partial` files are reported as warnings. Run it after copying an export to archive storage, and before restoring from it.
+
+### Resuming an interrupted export
+
+If an export stops partway (a crash, a reboot, a table that kept failing), rerun the same command with `--resume`:
+
+```powershell
+bcpjson export --source-database Sales --file-format json --export-path D:\dumps\sales --resume
+```
+
+Tables that the manifest records, and whose files still have the recorded size, are skipped; everything else is exported. The run must use the same `--file-format`, `--source-database` and `--source-query` as the manifest, otherwise it stops with an error. With `--snapshot`, each run takes its own snapshot, so tables from the earlier run reflect an earlier point in time (a warning says so). Use a fresh export when one point in time matters more than saving the work already done.
+
 ## JSON format
 
 Each file is a JSON array with one object per row, one row per line:
@@ -400,8 +470,11 @@ The solution `BcpJson.sln` holds the app in `src/BcpJson/` and the xUnit tests i
 | `Program.Import.cs` | JSON (SqlBulkCopy) and BCP import |
 | `Program.Copy.cs` | Server-to-server copy (SMO + SqlBulkCopy) |
 | `Program.Snapshot.cs` | Database snapshots for `--snapshot` |
+| `Program.Resilience.cs` | Retries for transient failures, `.partial` files |
+| `Program.Verify.cs` | The `verify` verb |
+| `ExportManifest.cs` | `bcpjson-manifest.json`: read, write, file hashes, resume checks |
 | `Program.Sql.cs` | Table selection, name quoting, shared SQL helpers |
-| `ExportOptions.cs`, `ImportOptions.cs`, `CopyOptions.cs` | Command-line options for each verb |
+| `ExportOptions.cs`, `ImportOptions.cs`, `CopyOptions.cs`, `VerifyOptions.cs` | Command-line options for each verb |
 | `SqlConnectionFactory.cs` | Connection string building and connection tests |
 | `SqlBulkCopyHelper.cs` | Row-count helper for SqlBulkCopy |
 | `CustomSelect.sql` | Reference copy of the JSON export metadata query |

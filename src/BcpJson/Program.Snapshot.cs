@@ -39,7 +39,7 @@ namespace bcpJson
                 SqlConnection.ClearAllPools();
                 try
                 {
-                    using (var conn = new SqlConnection(adminConnectionString))
+                    using (var conn = SqlConnectionFactory.Create(adminConnectionString))
                     {
                         conn.Open();
                         ExecuteSql(conn, "DROP DATABASE " + QuoteName(Name) + ";");
@@ -92,7 +92,7 @@ namespace bcpJson
 
             try
             {
-                using (var conn = new SqlConnection(adminConnectionString))
+                using (var conn = SqlConnectionFactory.Create(adminConnectionString))
                 {
                     conn.Open();
 

@@ -81,6 +81,9 @@ namespace bcpJson
         [Option("snapshot", Default = false, Required = false, HelpText = "Copy from a database snapshot of the source so every table reflects the same point in time. Needs CREATE DATABASE permission and SQL Server 2016 SP1+ (any edition); the snapshot is dropped afterwards.")]
         public bool Snapshot { get; set; }
 
+        [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries when opening a connection fails transiently (network error, failover, throttling), with exponential backoff. Copies themselves are not retried. 0 = no retries.")]
+        public int Retries { get; set; }
+
         public string SourceConnectionString()
         {
             return SqlConnectionFactory.Build(this.srcServer, this.srcDatabase, this.srcLogin, this.srcPassword, true, this.TrustServerCertificate);
@@ -97,6 +100,11 @@ namespace bcpJson
             this.IncludeSchemaList ??= new List<string>();
             this.ExcludeTablesList ??= new List<string>();
             this.ExcludeSchemaList ??= new List<string>();
+
+            if (!SqlConnectionFactory.ApplyRetries(this.Retries))
+            {
+                return false;
+            }
 
             if (string.IsNullOrEmpty(this.srcDatabase) || string.IsNullOrEmpty(this.TargetSQLDatabase))
             {

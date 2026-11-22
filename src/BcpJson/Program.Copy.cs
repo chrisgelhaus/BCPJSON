@@ -82,7 +82,7 @@ FROM sys.foreign_keys fk
 WHERE s.name = @schema AND t.name = @table;";
 
             int dropped = 0;
-            using (var conn = new SqlConnection(setting.TargetConnectionString()))
+            using (var conn = SqlConnectionFactory.Create(setting.TargetConnectionString()))
             {
                 conn.Open();
                 foreach (TableRef table in tables)
@@ -142,8 +142,8 @@ WHERE s.name = @schema AND t.name = @table;";
             int total = 0;
             int createdCount = 0;
             string sourceConnectionString = setting.SourceConnectionString();
-            using (var sourceSql = new SqlConnection(sourceConnectionString))
-            using (var targetConn = new SqlConnection(setting.TargetConnectionString()))
+            using (var sourceSql = SqlConnectionFactory.Create(sourceConnectionString))
+            using (var targetConn = SqlConnectionFactory.Create(setting.TargetConnectionString()))
             {
                 var sourceServer = new Server(new ServerConnection(sourceSql));
                 try
@@ -204,7 +204,7 @@ WHERE s.name = @schema AND t.name = @table;";
             };
 
             int createdCount = 0;
-            using (var conn = new SqlConnection(setting.TargetConnectionString()))
+            using (var conn = SqlConnectionFactory.Create(setting.TargetConnectionString()))
             {
                 conn.Open();
                 foreach (Check check in checks)
@@ -245,8 +245,8 @@ WHERE s.name = @schema AND t.name = @table;";
             int total = 0;
             int createdCount = 0;
             string sourceConnectionString = setting.SourceConnectionString();
-            using (var sourceSql = new SqlConnection(sourceConnectionString))
-            using (var targetConn = new SqlConnection(setting.TargetConnectionString()))
+            using (var sourceSql = SqlConnectionFactory.Create(sourceConnectionString))
+            using (var targetConn = SqlConnectionFactory.Create(setting.TargetConnectionString()))
             {
                 var sourceServer = new Server(new ServerConnection(sourceSql));
                 try
@@ -318,8 +318,8 @@ WHERE s.name = @schema AND t.name = @table;";
             string sourceConnectionString = setting.SourceConnectionString();
             string targetConnectionString = setting.TargetConnectionString();
 
-            using (var sourceSql = new SqlConnection(sourceConnectionString))
-            using (var targetSql = new SqlConnection(targetConnectionString))
+            using (var sourceSql = SqlConnectionFactory.Create(sourceConnectionString))
+            using (var targetSql = SqlConnectionFactory.Create(targetConnectionString))
             {
                 var sourceServer = new Server(new ServerConnection(sourceSql));
                 var targetServer = new Server(new ServerConnection(targetSql));
@@ -484,7 +484,7 @@ WHERE s.name = @schema AND t.name = @table;";
             };
 
             int createdCount = 0;
-            using (var conn = new SqlConnection(setting.TargetConnectionString()))
+            using (var conn = SqlConnectionFactory.Create(setting.TargetConnectionString()))
             {
                 conn.Open();
                 foreach (Index index in indexes)
@@ -548,7 +548,7 @@ WHERE s.name = @schema AND t.name = @table;";
             string select = "SELECT " + string.Join(", ", columns.Select(QuoteName)) + " FROM " + tableRef.QuotedName
                 + (setting.NoLock ? " WITH (NOLOCK)" : string.Empty);
 
-            using (var sourceConn = new SqlConnection(setting.SourceConnectionString()))
+            using (var sourceConn = SqlConnectionFactory.Create(setting.SourceConnectionString()))
             {
                 sourceConn.Open();
                 using (var cmd = new SqlCommand(select, sourceConn))
@@ -600,9 +600,11 @@ WHERE s.name = @schema AND t.name = @table;";
                     IncludeSchemaList = Enumerable.Empty<string>(),
                     ExcludeSchemaList = Enumerable.Empty<string>(),
                     FileFormat = "bcp",
-                    exportPath = workDir
+                    exportPath = workDir,
+                    Retries = setting.Retries
                 };
-                if (ExportToBCP(exportOptions) < 0)
+                // The temporary export is retried like any export; its manifest is discarded with the folder.
+                if (ExportToBCP(exportOptions, new ExportManifest()) < 0)
                 {
                     return -1;
                 }
