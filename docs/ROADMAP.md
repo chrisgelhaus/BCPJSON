@@ -32,7 +32,17 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
   - **Atomic files:** exports write `<file>.partial` and rename when complete; import ignores `.partial` files.
   - **Manifest + verify + resume:** `bcpjson-manifest.json` per export (tool, format, server, database, snapshot, start/completion, per-table rows and file size/SHA-256), saved after every table. New `verify` verb checks a folder against it without a database. `export --resume` skips tables already intact (same format/database/query required).
   - CI: `roundtrip.sh resilience` checks the manifest, catches a same-size edit and a missing file with `verify`, resumes a simulated crash (skipped files untouched, no `.partial` left, data identical), refuses a mismatched resume, and proves connection retry by renaming a database into place 20 s after the export starts (SqlClient's own single login retry after 10 s is not enough) (control: `--retries 0` fails). BCP and snapshot exports are verified too.
-- Remaining ideas from that review: compression (`.json.gz`), streaming JSON import without `DataTable` buffering, `SqlBulkCopy` column order hints, splitting very large tables, Entra ID authentication, SQL Server 2019/2025 in CI, linux-arm64/macOS builds, SRID-preserving spatial JSON.
+- Remaining ideas from that review: `SqlBulkCopy` column order hints, splitting very large tables, Entra ID authentication, SQL Server 2019/2025 in CI, linux-arm64/macOS builds, SRID-preserving spatial JSON.
+
+## Done after v2.4.0
+
+- Compression and streaming JSON import (ideas 5 and 6 of the 2026-11-21 review; options weighed and defaults chosen on 2026-11-22):
+  - **`--compress none|gzip`, default none.** Plain files stay diffable, which is the point of the format, and existing scripts keep working. gzip over zstd (needs a third-party package on .NET 8) and brotli (slow at good levels) because everything can read it. JSON is compressed while written; BCP after bcp finishes (bcp only writes plain files). Format files and the manifest stay plain. The manifest records the setting and `--resume` refuses a mismatch.
+  - **`--compression-level fastest|optimal|smallest`, default fastest:** most of the size reduction without slowing an export.
+  - **Import** recognises `.gz` by extension (no option): JSON decompresses while streaming, BCP to the temp folder first.
+  - **Streaming JSON import, no switch:** `JsonRowReader` feeds SqlBulkCopy directly instead of buffering 50,000 rows in a `DataTable`. Memory stays at one row and parsing overlaps sending. The old path had no advantage, so no option keeps it. Checked in SqlClient's source that a custom `IDataReader` returning `SqlDecimal` keeps 38 digits.
+  - **`import --batch-size`, default 50,000** (as before for JSON; bcp import was 10,000), 0 = one transaction per file.
+  - CI: `roundtrip.sh compression`. gzip JSON export matches the plain export after `zcat`; `.gz` import with 1,000-row batches and with `--batch-size 0`; gzip BCP export and import at `smallest`; verify on compressed exports; resume of a gzip export and refusal to resume it uncompressed. The `json` step covers the streaming import with plain files.
 
 ## Releases
 

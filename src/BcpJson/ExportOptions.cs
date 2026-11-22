@@ -63,8 +63,26 @@ namespace bcpJson
         [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries after a transient failure (network error, failover, throttling), with exponential backoff. Applies to opening connections and to exporting a table, which is redone from the start. --source-query exports are not retried. 0 = no retries.")]
         public int Retries { get; set; }
 
-        [Option("resume", Default = false, Required = false, HelpText = "Continue an interrupted export into the same --export-path: tables already recorded in its bcpjson-manifest.json with their files intact are skipped. Must use the same --file-format, --source-database and --source-query.")]
+        [Option("resume", Default = false, Required = false, HelpText = "Continue an interrupted export into the same --export-path: tables already recorded in its bcpjson-manifest.json with their files intact are skipped. Must use the same --file-format, --compress, --source-database and --source-query.")]
         public bool Resume { get; set; }
+
+        [Option("compress", Default = FileCompression.None, Required = false, HelpText = "Compress exported data files: none or gzip. gzip writes <name>.json.gz or <name>.bcp.gz (bcp data is compressed after bcp has written it); format files and the manifest stay plain. Import reads .gz files directly. Off by default so exports stay diffable line by line.")]
+        public string Compress { get; set; } = FileCompression.None;
+
+        [Option("compression-level", Default = FileCompression.DefaultLevel, Required = false, HelpText = "gzip level with --compress gzip: fastest (most of the size reduction at the highest speed), optimal or smallest.")]
+        public string CompressionLevel { get; set; } = FileCompression.DefaultLevel;
+
+        /// <summary>The gzip level when --compress gzip is set; null for uncompressed files.</summary>
+        public System.IO.Compression.CompressionLevel? GzipLevel
+        {
+            get { return FileCompression.IsGzip(this.Compress) ? FileCompression.ParseLevel(this.CompressionLevel) : null; }
+        }
+
+        /// <summary>The data file name for a table or query: &lt;name&gt;&lt;extension&gt;, plus .gz when compressing.</summary>
+        public string DataFileName(string name, string extension)
+        {
+            return name + extension + (FileCompression.IsGzip(this.Compress) ? FileCompression.GzipExtension : string.Empty);
+        }
 
         public bool IsQueryExport
         {
@@ -91,6 +109,18 @@ namespace bcpJson
 
             if (!SqlConnectionFactory.ApplyRetries(this.Retries))
             {
+                return false;
+            }
+
+            if (!FileCompression.IsValidMethod(this.Compress))
+            {
+                Program.PostToConsole("--compress must be none or gzip.", Program.InfoLevel.Error);
+                return false;
+            }
+
+            if (FileCompression.ParseLevel(this.CompressionLevel) == null)
+            {
+                Program.PostToConsole("--compression-level must be fastest, optimal or smallest.", Program.InfoLevel.Error);
                 return false;
             }
 

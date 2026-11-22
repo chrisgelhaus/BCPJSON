@@ -111,13 +111,40 @@ namespace bcpJson.Tests
         }
 
         [Fact]
-        public void Resume_needs_the_same_format_database_and_query()
+        public void Resume_needs_the_same_format_compression_database_and_query()
         {
             ExportManifest manifest = Manifest();
-            Assert.Null(manifest.ResumeConflict("JSON", "sales", null));
-            Assert.Contains("json, not bcp", manifest.ResumeConflict("bcp", "Sales", null));
-            Assert.Contains("'Sales', not 'Other'", manifest.ResumeConflict("json", "Other", null));
-            Assert.Contains("--source-query", manifest.ResumeConflict("json", "Sales", "SELECT 1"));
+            Assert.Null(manifest.ResumeConflict("JSON", "none", "sales", null));
+            Assert.Contains("json, not bcp", manifest.ResumeConflict("bcp", "none", "Sales", null));
+            Assert.Contains("--compress none, not gzip", manifest.ResumeConflict("json", "gzip", "Sales", null));
+            Assert.Contains("'Sales', not 'Other'", manifest.ResumeConflict("json", "none", "Other", null));
+            Assert.Contains("--source-query", manifest.ResumeConflict("json", "none", "Sales", "SELECT 1"));
+
+            manifest.Compression = "gzip";
+            Assert.Null(manifest.ResumeConflict("json", "GZIP", "Sales", null));
+            Assert.Contains("--compress gzip, not none", manifest.ResumeConflict("json", null, "Sales", null));
+        }
+
+        [Fact]
+        public void Manifests_without_compression_are_uncompressed_exports()
+        {
+            ExportManifest manifest = Manifest();
+            manifest.Compression = null;
+            Assert.Null(manifest.ResumeConflict("json", "none", "Sales", null));
+        }
+
+        [Fact]
+        public void Verify_warns_about_unlisted_compressed_data_files()
+        {
+            ExportManifest manifest = Manifest();
+            manifest.Completed = DateTime.UtcNow;
+            File.WriteAllText(Path.Combine(this.folder, "dbo.Old.json.gz"), "x");
+            File.WriteAllText(Path.Combine(this.folder, "dbo.Old.bcp.gz"), "x");
+            File.WriteAllText(Path.Combine(this.folder, "notes.gz"), "x");
+            Program.VerifyResult result = Program.CheckExport(this.folder, manifest);
+            Assert.Contains(result.Warnings, w => w.StartsWith("dbo.Old.json.gz:"));
+            Assert.Contains(result.Warnings, w => w.StartsWith("dbo.Old.bcp.gz:"));
+            Assert.DoesNotContain(result.Warnings, w => w.StartsWith("notes.gz:"));
         }
 
         [Fact]

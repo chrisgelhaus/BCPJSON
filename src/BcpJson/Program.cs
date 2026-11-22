@@ -151,7 +151,7 @@ namespace bcpJson
                     }
                     else
                     {
-                        string conflict = existing.ResumeConflict(format, opts.srcDatabase, opts.Query);
+                        string conflict = existing.ResumeConflict(format, opts.Compress, opts.srcDatabase, opts.Query);
                         if (conflict != null)
                         {
                             PostToConsole(string.Format("Cannot resume: {0}. Use another --export-path, or export without --resume.", conflict), InfoLevel.Error);
@@ -172,6 +172,7 @@ namespace bcpJson
                 {
                     Tool = ExportManifest.ToolVersion(),
                     Format = format,
+                    Compression = FileCompression.Normalize(opts.Compress),
                     Server = opts.srcServer,
                     Database = opts.srcDatabase,
                     Query = opts.Query,

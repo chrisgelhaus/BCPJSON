@@ -31,9 +31,19 @@ namespace bcpJson.Tests
             Assert.Equal("dbo.T-c.xml", Program.FindBcpFormatFile(folder, "dbo.T"));
         }
 
-        private static string BcpIn(string schema, string table, bool noTableLock = false)
+        private static string BcpIn(string schema, string table, bool noTableLock = false, int batchSize = 10000)
         {
-            return Program.BcpInArguments(schema, table, "x.bcp", "x-c.fmt", "-S \"srv\" -d \"db\" -T", noTableLock, "x_import_error.log");
+            return Program.BcpInArguments(schema, table, "x.bcp", "x-c.fmt", "-S \"srv\" -d \"db\" -T", noTableLock, "x_import_error.log", batchSize);
+        }
+
+        [Fact]
+        public void Bcp_in_batch_size_follows_the_setting()
+        {
+            Assert.Contains(" -q -b 50000 -h ", BcpIn("dbo", "T", batchSize: 50000));
+            // 0: no -b, so bcp loads the whole file in one transaction.
+            string args = BcpIn("dbo", "T", batchSize: 0);
+            Assert.DoesNotContain(" -b ", args);
+            Assert.Contains(" -E -k -q -h \"TABLOCK\" -e ", args);
         }
 
         [Theory]

@@ -61,6 +61,7 @@ namespace bcpJson
 
         private static bool IsExportDataFile(string name)
         {
+            name = FileCompression.WithoutGzipExtension(name);
             return name.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
                 || name.EndsWith(".bcp", StringComparison.OrdinalIgnoreCase)
                 || name.EndsWith(BcpFormatFileSuffix, StringComparison.OrdinalIgnoreCase)

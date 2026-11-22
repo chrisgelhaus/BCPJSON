@@ -29,6 +29,9 @@ namespace bcpJson
 
         public string Tool { get; set; }
         public string Format { get; set; }
+
+        /// <summary>none or gzip (--compress). Manifests from before --compress have no value, which means none.</summary>
+        public string Compression { get; set; }
         public string Server { get; set; }
         public string Database { get; set; }
         public string Query { get; set; }
@@ -100,13 +103,18 @@ namespace bcpJson
         }
 
         /// <summary>
-        /// Why a resumed export cannot continue this manifest (another format, database or query), or null if it can.
+        /// Why a resumed export cannot continue this manifest (another format, compression, database or query), or null if it can.
         /// </summary>
-        public string ResumeConflict(string format, string database, string query)
+        public string ResumeConflict(string format, string compression, string database, string query)
         {
             if (!string.Equals(this.Format, format, StringComparison.OrdinalIgnoreCase))
             {
                 return string.Format("the existing export is {0}, not {1}", this.Format, format);
+            }
+            string existing = FileCompression.Normalize(this.Compression);
+            if (existing != FileCompression.Normalize(compression))
+            {
+                return string.Format("the existing export uses --compress {0}, not {1}", existing, FileCompression.Normalize(compression));
             }
             if (!string.Equals(this.Database ?? string.Empty, database ?? string.Empty, StringComparison.OrdinalIgnoreCase))
             {
