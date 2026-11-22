@@ -58,39 +58,56 @@ SELECT @Columns, @SortOrder;";
 
         private static readonly Regex BcpRowsCopied = new Regex(@"(\d+) rows copied", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
-        private static long ExportToJSON(ExportOptions options)
+        /// <summary>The tables of the export, minus those --resume finds already exported and intact.</summary>
+        private static List<TableRef> TablesToExport(ExportOptions options, ExportManifest manifest)
         {
-            long totalrowCount = 0;
             List<TableRef> tables = GetSourceTables(options.SourceConnectionString(),
                 BuildSourceObjectIDList(options.IncludeTablesList, options.ExcludeTablesList, options.IncludeSchemaList, options.ExcludeSchemaList));
 
             if (tables.Count == 0)
             {
                 PostToConsole("No tables matched the include/exclude filters.", InfoLevel.Warning);
-                return 0;
+                return tables;
             }
+
+            if (options.Resume)
+            {
+                List<TableRef> remaining = tables.Where(t => !manifest.IsIntact(t.DisplayName, options.exportPath, false)).ToList();
+                PostToConsole(string.Format("--resume: {0} of {1} table(s) already exported, {2} to go.",
+                    tables.Count - remaining.Count, tables.Count, remaining.Count));
+                return remaining;
+            }
+            return tables;
+        }
+
+        /// <summary>A manifest entry for an exported table or query: its row count and the size and hash of its files.</summary>
+        private static ManifestTable ManifestEntry(string name, long rows, string folder, params string[] files)
+        {
+            return new ManifestTable
+            {
+                Name = name,
+                Rows = rows,
+                Exported = DateTime.UtcNow,
+                Files = files.Select(f => ManifestFile.Describe(folder, f)).ToList()
+            };
+        }
+
+        private static long ExportToJSON(ExportOptions options, ExportManifest manifest)
+        {
+            long totalrowCount = 0;
+            List<TableRef> tables = TablesToExport(options, manifest);
 
             Parallel.ForEach(tables, Parallelism(options.MaxParallelTasks), table =>
             {
+                string fileName = table.DisplayName + ".json";
                 try
                 {
-                    using (var conn = new SqlConnection(options.SourceConnectionString()))
-                    {
-                        conn.Open();
-                        string select = BuildTableSelect(conn, table, options.NoLock);
-
-                        using (var cmd = new SqlCommand(select, conn))
-                        {
-                            cmd.CommandTimeout = 0;
-                            using (var reader = cmd.ExecuteReader(CommandBehavior.SingleResult | CommandBehavior.SequentialAccess))
-                            {
-                                string filePath = Path.Combine(options.exportPath, table.DisplayName + ".json");
-                                long rows = WriteJsonRows(reader, filePath, table.DisplayName);
-                                Interlocked.Add(ref totalrowCount, rows);
-                                PostToConsole(string.Format("{0}: {1:N0} (Complete)", table.DisplayName, rows), InfoLevel.Success);
-                            }
-                        }
-                    }
+                    // Exporting a table only rewrites its file, so a transient failure retries the whole table.
+                    long rows = WithRetries(table.DisplayName, options.Retries,
+                        () => ExportTableToJson(options, table, Path.Combine(options.exportPath, fileName)), IsTransientSqlError);
+                    manifest.Record(ManifestEntry(table.DisplayName, rows, options.exportPath, fileName), options.exportPath);
+                    Interlocked.Add(ref totalrowCount, rows);
+                    PostToConsole(string.Format("{0}: {1:N0} (Complete)", table.DisplayName, rows), InfoLevel.Success);
                 }
                 catch (Exception ex)
                 {
@@ -101,11 +118,52 @@ SELECT @Columns, @SortOrder;";
             return totalrowCount;
         }
 
-        private static long ExportQueryToJSON(ExportOptions options)
+        /// <summary>Writes one table to &lt;file&gt;.partial and renames it to <paramref name="filePath"/> when complete.</summary>
+        private static long ExportTableToJson(ExportOptions options, TableRef table, string filePath)
         {
             try
             {
-                using (var conn = new SqlConnection(options.SourceConnectionString()))
+                using (var conn = SqlConnectionFactory.Create(options.SourceConnectionString()))
+                {
+                    conn.Open();
+                    string select = BuildTableSelect(conn, table, options.NoLock);
+
+                    using (var cmd = new SqlCommand(select, conn))
+                    {
+                        cmd.CommandTimeout = 0;
+                        using (var reader = cmd.ExecuteReader(CommandBehavior.SingleResult | CommandBehavior.SequentialAccess))
+                        {
+                            long rows = WriteJsonRows(reader, PartialPath(filePath), table.DisplayName);
+                            CommitPartial(filePath);
+                            return rows;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                DiscardPartial(filePath);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// --source-query to JSON. Not retried (the query may be a procedure with side effects); only the connection
+        /// open is.
+        /// </summary>
+        private static long ExportQueryToJSON(ExportOptions options, ExportManifest manifest)
+        {
+            string fileName = options.OutputName + ".json";
+            string filePath = Path.Combine(options.exportPath, fileName);
+            if (options.Resume && manifest.IsIntact(options.OutputName, options.exportPath, false))
+            {
+                PostToConsole(string.Format("--resume: {0} already exported.", fileName));
+                return 0;
+            }
+
+            try
+            {
+                using (var conn = SqlConnectionFactory.Create(options.SourceConnectionString()))
                 {
                     conn.Open();
                     using (var cmd = new SqlCommand(options.Query, conn))
@@ -113,8 +171,9 @@ SELECT @Columns, @SortOrder;";
                         cmd.CommandTimeout = 0;
                         using (var reader = cmd.ExecuteReader(CommandBehavior.SingleResult | CommandBehavior.SequentialAccess))
                         {
-                            string filePath = Path.Combine(options.exportPath, options.OutputName + ".json");
-                            long rows = WriteJsonRows(reader, filePath, options.OutputName);
+                            long rows = WriteJsonRows(reader, PartialPath(filePath), options.OutputName);
+                            CommitPartial(filePath);
+                            manifest.Record(ManifestEntry(options.OutputName, rows, options.exportPath, fileName), options.exportPath);
                             PostToConsole(string.Format("{0}: {1:N0} (Complete)", options.OutputName, rows), InfoLevel.Success);
                             return rows;
                         }
@@ -123,6 +182,7 @@ SELECT @Columns, @SortOrder;";
             }
             catch (Exception ex)
             {
+                DiscardPartial(filePath);
                 PostToConsole(string.Format("{0}: {1}", options.OutputName, ex.Message), InfoLevel.Error);
                 return -1;
             }
@@ -242,59 +302,81 @@ SELECT @Columns, @SortOrder;";
             return rows;
         }
 
-        private static long ExportToBCP(ExportOptions options)
+        private static long ExportToBCP(ExportOptions options, ExportManifest manifest)
         {
             long totalrowCount = 0;
-            List<TableRef> tables = GetSourceTables(options.SourceConnectionString(),
-                BuildSourceObjectIDList(options.IncludeTablesList, options.ExcludeTablesList, options.IncludeSchemaList, options.ExcludeSchemaList));
-
-            if (tables.Count == 0)
-            {
-                PostToConsole("No tables matched the include/exclude filters.", InfoLevel.Warning);
-                return 0;
-            }
-
+            List<TableRef> tables = TablesToExport(options, manifest);
             string connectionArgs = BcpConnectionArgs(options.srcServer, options.srcDatabase, options.srcLogin, options.srcPassword, options.TrustServerCertificate);
             string outputPath = options.exportPath;
 
             Parallel.ForEach(tables, Parallelism(options.MaxParallelTasks), table =>
             {
                 string name = table.DisplayName;
-
-                // Format file (used by import to map columns). Non-XML, because the Linux bcp does not support -x.
-                // "nul" is the no-data-file placeholder on Windows; on Linux bcp would create a file named "nul".
-                string formatArgs = string.Format("{0} format {1} {2} -c -f {3} -t|",
-                    Arg(table.QuotedName), OperatingSystem.IsWindows() ? "nul" : "/dev/null", connectionArgs, Arg(name + BcpFormatFileSuffix));
-                if (ExecuteProcess(BcpTool, formatArgs, outputPath) != 0)
+                try
                 {
-                    PostToConsole(string.Format("{0}: Error creating format file.", name), InfoLevel.Error);
-                    return;
-                }
-                PostToConsole(string.Format("{0}: Format file created.", name), InfoLevel.Success);
-
-                // Data
-                string outputLog = name + "_output.log";
-                string exportArgs = string.Format("{0} out {1} {2} -c -t| -m 1 -b 10000 -K ReadOnly -e {3}",
-                    Arg(table.QuotedName), Arg(name + ".bcp"), connectionArgs, Arg(name + "_error.log"));
-                if (ExecuteProcess(BcpTool, exportArgs, outputPath, outputLog) == 0)
-                {
-                    long rows = ReadBcpRowCount(Path.Combine(outputPath, outputLog));
+                    // bcp reports no error numbers, so any bcp failure is retried; the table's files are simply rewritten.
+                    long rows = WithRetries(name, options.Retries,
+                        () => ExportTableToBcp(table, connectionArgs, outputPath), ex => ex is BcpFailedException);
+                    manifest.Record(ManifestEntry(name, rows, outputPath, name + ".bcp", name + BcpFormatFileSuffix), outputPath);
                     if (rows > 0)
                     {
                         Interlocked.Add(ref totalrowCount, rows);
                     }
                     PostToConsole(string.Format("{0}: {1:N0}", name, rows), InfoLevel.Info);
                 }
-                else
+                catch (Exception ex)
                 {
-                    PostToConsole(string.Format("{0}: bcp export failed. See {1}_error.log and {2}.", name, name, outputLog), InfoLevel.Error);
+                    PostToConsole(string.Format("{0}: {1}", name, ex.Message), InfoLevel.Error);
                 }
             });
 
             return totalrowCount;
         }
 
-        private static long ExportQueryToBCP(ExportOptions options)
+        /// <summary>
+        /// Writes a table's format and data files as .partial files and renames both once bcp has succeeded.
+        /// Throws <see cref="BcpFailedException"/> when bcp fails.
+        /// </summary>
+        private static long ExportTableToBcp(TableRef table, string connectionArgs, string outputPath)
+        {
+            string name = table.DisplayName;
+            string formatPath = Path.Combine(outputPath, name + BcpFormatFileSuffix);
+            string dataPath = Path.Combine(outputPath, name + ".bcp");
+            try
+            {
+                // Format file (used by import to map columns). Non-XML, because the Linux bcp does not support -x.
+                // "nul" is the no-data-file placeholder on Windows; on Linux bcp would create a file named "nul".
+                string formatArgs = string.Format("{0} format {1} {2} -c -f {3} -t|",
+                    Arg(table.QuotedName), OperatingSystem.IsWindows() ? "nul" : "/dev/null", connectionArgs, Arg(PartialPath(name + BcpFormatFileSuffix)));
+                if (ExecuteProcess(BcpTool, formatArgs, outputPath) != 0)
+                {
+                    throw new BcpFailedException("Error creating format file.");
+                }
+                PostToConsole(string.Format("{0}: Format file created.", name), InfoLevel.Success);
+
+                // Data
+                string outputLog = name + "_output.log";
+                string exportArgs = string.Format("{0} out {1} {2} -c -t| -m 1 -b 10000 -K ReadOnly -e {3}",
+                    Arg(table.QuotedName), Arg(PartialPath(name + ".bcp")), connectionArgs, Arg(name + "_error.log"));
+                if (ExecuteProcess(BcpTool, exportArgs, outputPath, outputLog) != 0)
+                {
+                    throw new BcpFailedException(string.Format("bcp export failed. See {0}_error.log and {1}.", name, outputLog));
+                }
+
+                CommitPartial(formatPath);
+                CommitPartial(dataPath);
+                return ReadBcpRowCount(Path.Combine(outputPath, outputLog));
+            }
+            catch
+            {
+                DiscardPartial(formatPath);
+                DiscardPartial(dataPath);
+                throw;
+            }
+        }
+
+        /// <summary>--source-query with bcp queryout. Not retried (the query may have side effects).</summary>
+        private static long ExportQueryToBCP(ExportOptions options, ExportManifest manifest)
         {
             if (options.Query.Contains("\""))
             {
@@ -302,19 +384,29 @@ SELECT @Columns, @SortOrder;";
                 return -1;
             }
 
-            string connectionArgs = BcpConnectionArgs(options.srcServer, options.srcDatabase, options.srcLogin, options.srcPassword, options.TrustServerCertificate);
             string name = options.OutputName;
+            string dataPath = Path.Combine(options.exportPath, name + ".bcp");
+            if (options.Resume && manifest.IsIntact(name, options.exportPath, false))
+            {
+                PostToConsole(string.Format("--resume: {0}.bcp already exported.", name));
+                return 0;
+            }
+
+            string connectionArgs = BcpConnectionArgs(options.srcServer, options.srcDatabase, options.srcLogin, options.srcPassword, options.TrustServerCertificate);
             string outputLog = name + "_output.log";
             string args = string.Format("{0} queryout {1} {2} -c -t| -m 1 -b 10000 -K ReadOnly -e {3}",
-                Arg(options.Query), Arg(name + ".bcp"), connectionArgs, Arg(name + "_error.log"));
+                Arg(options.Query), Arg(PartialPath(name + ".bcp")), connectionArgs, Arg(name + "_error.log"));
 
             if (ExecuteProcess(BcpTool, args, options.exportPath, outputLog) != 0)
             {
+                DiscardPartial(dataPath);
                 PostToConsole(string.Format("{0}: bcp export failed. See {0}_error.log and {1}.", name, outputLog), InfoLevel.Error);
                 return -1;
             }
 
+            CommitPartial(dataPath);
             long rows = ReadBcpRowCount(Path.Combine(options.exportPath, outputLog));
+            manifest.Record(ManifestEntry(name, rows, options.exportPath, name + ".bcp"), options.exportPath);
             PostToConsole(string.Format("{0}: {1:N0}", name, rows), InfoLevel.Info);
             return rows;
         }

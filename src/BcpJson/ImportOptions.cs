@@ -44,6 +44,9 @@ namespace bcpJson
         [Option("no-table-lock", Default = false, Required = false, HelpText = "Load without a table lock (TABLOCK). By default the target is locked for the load, which is fastest and allows minimal logging; use this when other sessions must keep reading or writing the table during the load, or when several files load into one table with a clustered index.")]
         public bool NoTableLock { get; set; }
 
+        [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries when opening a connection fails transiently (network error, failover, throttling), with exponential backoff. Loads themselves are not retried. 0 = no retries.")]
+        public int Retries { get; set; }
+
         public string GetTargetConnectionString()
         {
             return SqlConnectionFactory.Build(this.TargetSQLServer, this.TargetSQLDatabase, this.TargetSQLLogin, this.TargetSQLPassword, false, this.TrustServerCertificate);
@@ -51,6 +54,11 @@ namespace bcpJson
 
         public bool Valid()
         {
+            if (!SqlConnectionFactory.ApplyRetries(this.Retries))
+            {
+                return false;
+            }
+
             if (string.IsNullOrEmpty(this.SourcePath))
             {
                 this.SourcePath = Directory.GetCurrentDirectory();

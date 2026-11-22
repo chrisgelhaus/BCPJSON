@@ -11,6 +11,8 @@
 #   roundtrip.sh snapshot  export --snapshot (JSON and BCP), diff with the source export; no snapshot may be left behind
 #   roundtrip.sh consistency  export --snapshot while a writer moves value between two tables: totals must be exact;
 #                          without --snapshot the same export must drift (proves the check works)
+#   roundtrip.sh resilience   manifest + verify (and tampering caught), export --resume after a simulated crash,
+#                          connection retry while the database comes online
 #
 # Table locking: JSON import and copy use the default (TABLOCK); BCP import uses --no-table-lock.
 #
@@ -28,6 +30,7 @@ SQL_USER="${SQL_USER:-sa}"
 : "${BCPJSON:?BCPJSON (path to bcpjson.dll or the bcpjson executable) is required}"
 WORK="${WORK:-${RUNNER_TEMP:-/tmp}/bcpjson-roundtrip}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+MANIFEST=bcpjson-manifest.json
 
 export SQLCMDPASSWORD="$SQL_PASSWORD"
 
@@ -40,13 +43,15 @@ SOURCE=(--source-server "$SQL_SERVER" --source-login "$SQL_USER" --source-passwo
 TARGET=(--target-server "$SQL_SERVER" --target-login "$SQL_USER" --target-password "$SQL_PASSWORD")
 
 # Runs bcpjson; the command line is echoed with the password masked. A non-zero exit fails the script.
+# verify needs no server, so it gets no --trust-server-certificate.
 bcpjson() {
-    local shown="$*"
+    local shown="$*" extra=(--trust-server-certificate)
     echo "+ bcpjson ${shown//"$SQL_PASSWORD"/***}"
+    [ "$1" = verify ] && extra=()
     if [[ "$BCPJSON" == *.dll ]]; then
-        dotnet "$BCPJSON" "$@" --trust-server-certificate
+        dotnet "$BCPJSON" "$@" "${extra[@]}"
     else
-        "$BCPJSON" "$@" --trust-server-certificate
+        "$BCPJSON" "$@" "${extra[@]}"
     fi
 }
 
@@ -61,11 +66,17 @@ export_json() {
 compare_exact() {
     local expected="$1" actual="$2"
     echo "Comparing $actual with $expected"
-    if ! diff -r -u "$expected" "$actual"; then
+    # The manifest records when and from where each export ran, so it always differs.
+    if ! diff -r -u -x "$MANIFEST" "$expected" "$actual"; then
         echo "::error::Round trip changed the data: $actual differs from $expected"
         return 1
     fi
-    echo "Identical: $(ls "$expected" | wc -l) files."
+    echo "Identical: $(data_file_count "$expected") files."
+}
+
+# Files in an export folder, not counting the manifest.
+data_file_count() {
+    ls "$1" | grep -vc "^$MANIFEST\$"
 }
 
 # Comparison that ignores row order (used where the target has no primary key to sort by).
@@ -74,6 +85,7 @@ compare_unordered() {
     echo "Comparing $actual with $expected (row order ignored)"
     for f in "$expected"/*.json; do
         local name; name="$(basename "$f")"
+        [ "$name" = "$MANIFEST" ] && continue
         if [ ! -f "$actual/$name" ]; then
             echo "::error::Missing $name in $actual"
             status=1
@@ -84,7 +96,7 @@ compare_unordered() {
             status=1
         fi
     done
-    [ "$status" -eq 0 ] && echo "Identical (unordered): $(ls "$expected" | wc -l) files."
+    [ "$status" -eq 0 ] && echo "Identical (unordered): $(data_file_count "$expected") files."
     return "$status"
 }
 
@@ -192,6 +204,7 @@ case "${1:-}" in
         rm -rf "$WORK/source-bcp"
         bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format bcp --include-schemas plain --export-path "$WORK/source-bcp"
         ls -l "$WORK/source-bcp"
+        bcpjson verify --path "$WORK/source-bcp"
         # Table locking is the default; this path covers --no-table-lock (JSON import and copy cover TABLOCK).
         bcpjson import "${TARGET[@]}" --target-database BcpJsonBcp --file-format bcp --no-table-lock --source-path "$WORK/source-bcp" --source-file '*.bcp'
         compare_decimals BcpJsonBcp
@@ -243,6 +256,9 @@ case "${1:-}" in
         assert_no_snapshots
         ls -l "$WORK/snapshot-bcp"
         [ -s "$WORK/snapshot-bcp/plain.Numbers.bcp" ] || { echo "::error::Snapshot BCP export wrote no data"; exit 1; }
+        # The manifest names the source database, not the temporary snapshot.
+        jq -e '.snapshot == true and .database == "BcpJsonSource" and .completed != null' "$WORK/snapshot-json/$MANIFEST" > /dev/null \
+            || { echo "::error::Snapshot export manifest is wrong"; cat "$WORK/snapshot-json/$MANIFEST"; exit 1; }
         ;;
 
     consistency)
@@ -294,8 +310,72 @@ case "${1:-}" in
         echo "Without --snapshot the export was off by $drift; both --snapshot exports were exact."
         ;;
 
+    resilience)
+        command -v jq >/dev/null || { echo "jq not found on PATH"; exit 1; }
+        src="$WORK/source-json"
+        tables="$(data_file_count "$src")"
+
+        # 1. The setup export wrote a complete manifest listing every table, and verify accepts it.
+        jq -e --argjson n "$tables" '.completed != null and .format == "json" and .database == "BcpJsonSource" and (.tables | length) == $n and all(.tables[]; .files[0].sha256 | length == 64)' \
+            "$src/$MANIFEST" > /dev/null || { echo "::error::Manifest of the source export is wrong"; cat "$src/$MANIFEST"; exit 1; }
+        bcpjson verify --path "$src"
+
+        # 2. verify catches a same-size edit (only the hash differs) and a missing file.
+        rm -rf "$WORK/tampered"
+        cp -r "$src" "$WORK/tampered"
+        sed -i 's/"Code":"AAA"/"Code":"AAB"/' "$WORK/tampered/rt.Parent.json"
+        grep -q '"Code":"AAB"' "$WORK/tampered/rt.Parent.json" || { echo "::error::Tampering did not change rt.Parent.json"; exit 1; }
+        rm "$WORK/tampered/plain.Ref.json"
+        if bcpjson verify --path "$WORK/tampered" > "$WORK/verify-tampered.log" 2>&1; then
+            cat "$WORK/verify-tampered.log"; echo "::error::verify accepted a tampered export"; exit 1
+        fi
+        cat "$WORK/verify-tampered.log"
+        grep -q "rt.Parent.json: SHA-256" "$WORK/verify-tampered.log" && grep -q "plain.Ref.json: missing" "$WORK/verify-tampered.log" \
+            || { echo "::error::verify did not name both damaged files"; exit 1; }
+
+        # 3. --resume after a simulated crash: two tables missing from the manifest, one of them half-written.
+        res="$WORK/resume"
+        rm -rf "$res"
+        cp -r "$src" "$res"
+        rm "$res/plain.Ref.json" "$res/rt.Child.json"
+        printf '[{"Id":1' > "$res/rt.Child.json.partial"
+        jq '.completed = null | .tables |= map(select(.name != "plain.Ref" and .name != "rt.Child"))' "$src/$MANIFEST" > "$res/$MANIFEST"
+        touch -d '2001-01-01' "$res/rt.Parent.json"
+        if bcpjson verify --path "$res" > /dev/null 2>&1; then echo "::error::verify accepted an incomplete export"; exit 1; fi
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format json --export-path "$res" --resume | tee "$WORK/resume.log"
+        grep -qF -- "--resume: $((tables - 2)) of $tables table(s) already exported, 2 to go." "$WORK/resume.log" \
+            || { echo "::error::--resume did not skip exactly the completed tables"; exit 1; }
+        [ "$(date -r "$res/rt.Parent.json" +%Y)" = "2001" ] || { echo "::error::--resume rewrote a completed table"; exit 1; }
+        [ -z "$(find "$res" -name '*.partial')" ] || { echo "::error::.partial files left behind"; ls -l "$res"; exit 1; }
+        compare_exact "$src" "$res"
+        bcpjson verify --path "$res"
+        # Resuming into an export of another kind is refused.
+        if bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format bcp --export-path "$res" --resume > "$WORK/resume-conflict.log" 2>&1; then
+            echo "::error::--resume continued a JSON export as BCP"; exit 1
+        fi
+        grep -q "Cannot resume: the existing export is json, not bcp" "$WORK/resume-conflict.log" || { cat "$WORK/resume-conflict.log"; exit 1; }
+
+        # 4. Connection retry: the database only appears (renamed into place, with its table) 20 s after the export
+        #    starts; until then opening it fails with error 4060, which is transient. SqlClient itself retries a login
+        #    once after 10 s (ConnectRetryCount=1), so 20 s ensures bcpjson's own retries are what make it succeed.
+        sql -Q "DROP DATABASE IF EXISTS BcpJsonLate; DROP DATABASE IF EXISTS BcpJsonLateStaging; CREATE DATABASE BcpJsonLateStaging;"
+        sql -d BcpJsonLateStaging -Q "CREATE TABLE dbo.T (Id INT NOT NULL PRIMARY KEY); INSERT dbo.T VALUES (1), (2);"
+        if bcpjson export "${SOURCE[@]}" --source-database BcpJsonLate --file-format json --export-path "$WORK/late-noretry" --retries 0 > "$WORK/late-noretry.log" 2>&1; then
+            echo "::error::Control failed: the export succeeded although the database does not exist yet"; exit 1
+        fi
+        echo "Without retries the export fails at once: $(grep -m1 'Cannot connect' "$WORK/late-noretry.log")"
+        (sleep 20; sql -Q "ALTER DATABASE BcpJsonLateStaging MODIFY NAME = BcpJsonLate;" > /dev/null) &
+        renamer=$!
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonLate --file-format json --export-path "$WORK/late" --retries 8 | tee "$WORK/late.log"
+        wait "$renamer"
+        grep -q "Connection failed" "$WORK/late.log" || { echo "::error::No connection retry was logged"; exit 1; }
+        [ "$(jq '.tables[0].rows' "$WORK/late/$MANIFEST")" = "2" ] || { echo "::error::Retried export has the wrong rows"; cat "$WORK/late/$MANIFEST"; exit 1; }
+        bcpjson verify --path "$WORK/late"
+        sql -Q "DROP DATABASE BcpJsonLate;"
+        ;;
+
     *)
-        echo "usage: $0 setup|json|bcp|copy|snapshot|consistency" >&2
+        echo "usage: $0 setup|json|bcp|copy|snapshot|consistency|resilience" >&2
         exit 2
         ;;
 esac

@@ -8,7 +8,7 @@ namespace bcpJson.Tests
         private static ParserResult<object> Parse(params string[] args)
         {
             var parser = new Parser(settings => settings.HelpWriter = null);
-            return parser.ParseArguments<ExportOptions, ImportOptions, CopyOptions>(args);
+            return parser.ParseArguments<ExportOptions, ImportOptions, CopyOptions, VerifyOptions>(args);
         }
 
         private static T Parsed<T>(params string[] args)
@@ -191,6 +191,29 @@ namespace bcpJson.Tests
             Assert.Equal(1, exitCode);
             Assert.Equal("", stdout);
             Assert.Contains("source-file", stderr);
+        }
+
+        [Fact]
+        public void Retries_default_to_three_on_every_database_verb()
+        {
+            Assert.Equal(3, Parsed<ExportOptions>("export", "--source-database", "Sales").Retries);
+            Assert.Equal(3, Parsed<ImportOptions>("import", "--file-format", "json", "--source-file", "*.json").Retries);
+            Assert.Equal(3, Parsed<CopyOptions>("copy", "--source-database", "A", "--target-database", "B").Retries);
+            Assert.Equal(0, Parsed<ExportOptions>("export", "--source-database", "Sales", "--retries", "0").Retries);
+        }
+
+        [Fact]
+        public void Resume_is_opt_in()
+        {
+            Assert.False(Parsed<ExportOptions>("export", "--source-database", "Sales").Resume);
+            Assert.True(Parsed<ExportOptions>("export", "--source-database", "Sales", "--resume").Resume);
+        }
+
+        [Fact]
+        public void Verify_takes_a_path()
+        {
+            Assert.Null(Parsed<VerifyOptions>("verify").Path);
+            Assert.Equal("dumps", Parsed<VerifyOptions>("verify", "--path", "dumps").Path);
         }
 
         [Fact]

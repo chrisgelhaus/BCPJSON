@@ -128,6 +128,10 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: bash tests/integration/roundtrip.sh consistency
 
+      - name: Resilience (manifest, verify, --resume, connection retry)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: bash tests/integration/roundtrip.sh resilience
+
       - name: Upload exported files
         if: failure()
         uses: actions/upload-artifact@v7
