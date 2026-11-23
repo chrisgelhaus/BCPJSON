@@ -134,7 +134,7 @@ namespace bcpJson
         /// Resolves a table name ("schema.table", "[schema].[table]" or "table") in the target database.
         /// Returns { schema, name, object_id, objectName } or null if not found.
         /// </summary>
-        private static string[] GetTableObject(string objectName, string connectionString)
+        private static string[] GetTableObject(string objectName, SqlConnection conn)
         {
             const string sql = @"SET NOCOUNT ON;
 SELECT TOP (2) t.object_id, s.name AS schema_name, t.name AS table_name
@@ -143,32 +143,28 @@ FROM sys.tables t
 WHERE t.type = 'U'
       AND (s.name + N'.' + t.name = @name OR t.object_id = OBJECT_ID(@name));";
 
-            using (var conn = SqlConnectionFactory.Create(connectionString))
+            using (var cmd = new SqlCommand(sql, conn))
             {
-                conn.Open();
-                using (var cmd = new SqlCommand(sql, conn))
+                cmd.Parameters.Add("@name", SqlDbType.NVarChar, 512).Value = objectName;
+                var result = new DataTable();
+                using (var reader = cmd.ExecuteReader(CommandBehavior.SingleResult))
                 {
-                    cmd.Parameters.Add("@name", SqlDbType.NVarChar, 512).Value = objectName;
-                    var result = new DataTable();
-                    using (var reader = cmd.ExecuteReader(CommandBehavior.SingleResult))
-                    {
-                        result.Load(reader);
-                    }
-
-                    if (result.Rows.Count != 1)
-                    {
-                        return null;
-                    }
-
-                    DataRow row = result.Rows[0];
-                    return new[]
-                    {
-                        row["schema_name"].ToString(),
-                        row["table_name"].ToString(),
-                        row["object_id"].ToString(),
-                        objectName
-                    };
+                    result.Load(reader);
                 }
+
+                if (result.Rows.Count != 1)
+                {
+                    return null;
+                }
+
+                DataRow row = result.Rows[0];
+                return new[]
+                {
+                    row["schema_name"].ToString(),
+                    row["table_name"].ToString(),
+                    row["object_id"].ToString(),
+                    objectName
+                };
             }
         }
     }

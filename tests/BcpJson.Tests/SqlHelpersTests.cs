@@ -17,6 +17,15 @@ namespace bcpJson.Tests
         }
 
         [Theory]
+        [InlineData("[dbo].[T]", "dbo.T")]
+        [InlineData("[a]]b].[x.y]", "a]b.x.y")]
+        [InlineData("[s].[]].[]", "s.].[")]
+        public void UnquotedLabel_reverses_quoted_schema_and_table(string input, string expected)
+        {
+            Assert.Equal(expected, Program.UnquotedLabel(input));
+        }
+
+        [Theory]
         [InlineData("abc", "N'abc'")]
         [InlineData("O'Brien", "N'O''Brien'")]
         [InlineData("''", "N''''''")]

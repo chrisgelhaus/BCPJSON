@@ -45,7 +45,8 @@ namespace bcpJson
                 .ToList();
         }
 
-        private static string StemOf(string fileName)
+        /// <summary>The file name without .gz and its extension: "dbo.T.part0001.json.gz" gives "dbo.T.part0001".</summary>
+        internal static string StemOf(string fileName)
         {
             return Path.GetFileNameWithoutExtension(FileCompression.WithoutGzipExtension(fileName));
         }

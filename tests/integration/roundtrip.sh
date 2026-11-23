@@ -16,7 +16,9 @@
 #   roundtrip.sh compression  export --compress gzip (JSON and BCP) -> verify -> import the .gz files (small and
 #                          single-transaction batches) -> export JSON, diff with the source export; --resume rules
 #   roundtrip.sh split     CONVERT styles of split boundaries; export --split-tables (JSON from a snapshot, BCP): part
-#                          counts, verify, joined parts equal the unsplit export; --resume redoes a missing part
+#                          counts, verify, joined parts equal the unsplit export; --resume redoes a missing part;
+#                          import of the parts (load modes, --disable-indexes and a failing unique rebuild, another
+#                          clustered key, BCP parts, truncate once per table)
 #
 # Table locking: JSON import and copy use the default (TABLOCK); BCP import uses --no-table-lock.
 #
@@ -599,6 +601,73 @@ case "${1:-}" in
         grep -qF "split.Big: 1 part(s) to go." "$WORK/split-resume.log" || { echo "::error::--resume did not redo exactly one part"; exit 1; }
         cmp "$sj/split.Big.part0003.json" "$res/split.Big.part0003.json" || { echo "::error::The redone part differs"; exit 1; }
         bcpjson verify --path "$res"
+
+        # 5. Import the split JSON export: parts are grouped per table and load in parallel or one after another.
+        scalar() { sql -d "$1" -h -1 -W -Q "SET NOCOUNT ON; $2" | tr -d '[:space:]'; }
+        sjs="$WORK/source-json-split"
+        rm -rf "$sjs"
+        mkdir -p "$sjs"
+        cp "$src"/split.*.json "$sjs/"
+        # (a) Plain import: clustered targets load their parts in key order with an order hint each, heaps in parallel.
+        create_target_db BcpJsonSplit
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --max-tasks 4 --source-path "$sj" --source-file '*.json' | tee "$WORK/split-import.log"
+        grep -qF "split.Big: 8 parts, loading one after another (clustered index)." "$WORK/split-import.log" || { echo "::error::split.Big did not load its parts one after another"; exit 1; }
+        grep -qE "split\.PartedHeap: [0-9]+ parts, loading in parallel\." "$WORK/split-import.log" || { echo "::error::split.PartedHeap did not load its parts in parallel"; exit 1; }
+        grep -qE "split\.PartedCci: [0-9]+ parts, loading one after another \(columnstore\)\." "$WORK/split-import.log" || { echo "::error::split.PartedCci was not loaded one part after another"; exit 1; }
+        grep -qE "split\.Heap: [0-9,.]+ \(Import Complete\)" "$WORK/split-import.log" || { echo "::error::split.Heap was not imported"; exit 1; }
+        if grep -qE "split\.Heap: [0-9]+ parts" "$WORK/split-import.log"; then echo "::error::An unsplit table logged a load mode"; exit 1; fi
+        hints="$(grep -c "split.Big: Rows are in clustered index order; loading with an order hint." "$WORK/split-import.log" || true)"
+        [ "$hints" = "8" ] || { echo "::error::split.Big logged $hints order hints, expected one per part (8)"; exit 1; }
+        export_json BcpJsonSplit "$WORK/split-import" --include-schemas split
+        compare_exact "$sjs" "$WORK/split-import"
+
+        # (d) Parts into a target clustered on another key: no order hint, every row arrives.
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --source-path "$sj" --source-file 'split.Big.part*.json' --target-table split.BigOther | tee "$WORK/split-import-other.log"
+        if grep -q "Rows are in clustered index order" "$WORK/split-import-other.log"; then echo "::error::Order hint on a different clustered key"; exit 1; fi
+        [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.BigOther;")" = "200000" ] || { echo "::error::split.BigOther does not hold 200,000 rows"; exit 1; }
+        echo "split.BigOther: 200,000 rows from the parts of split.Big, no order hint."
+
+        # (f) --truncate-target empties a table once, before its first part: importing twice leaves 200,000 rows, not one part's.
+        for run in 1 2; do
+            bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --max-tasks 4 --truncate-target --source-path "$sj" --source-file 'split.Big.part*.json' | tee "$WORK/split-import-truncate.log"
+        done
+        [ "$(grep -c "split.Big: Truncate Complete." "$WORK/split-import-truncate.log")" = "1" ] || { echo "::error::split.Big was not truncated exactly once"; exit 1; }
+        [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.Big;")" = "200000" ] || { echo "::error::split.Big does not hold 200,000 rows after two truncating imports"; exit 1; }
+        echo "--truncate-target: one truncation per table, 200,000 rows."
+
+        # (b) --disable-indexes: nonclustered indexes (not the primary key) are disabled for the load and rebuilt after it.
+        create_target_db BcpJsonSplitIdx
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitIdx --file-format json --max-tasks 4 --disable-indexes --source-path "$sj" --source-file '*.json' | tee "$WORK/split-import-idx.log"
+        grep -qF "split.Big: Disabled indexes: IX_Big_Stamp, UX_Big_Code." "$WORK/split-import-idx.log" || { echo "::error::split.Big did not log its disabled indexes"; exit 1; }
+        grep -qF "split.Big: Rebuilt 2 index(es)." "$WORK/split-import-idx.log" || { echo "::error::split.Big did not log the rebuild"; exit 1; }
+        [ "$(scalar BcpJsonSplitIdx "SELECT COUNT(*) FROM sys.indexes WHERE is_disabled = 1;")" = "0" ] || { echo "::error::Indexes left disabled after --disable-indexes"; exit 1; }
+        export_json BcpJsonSplitIdx "$WORK/split-import-idx" --include-schemas split
+        compare_exact "$sjs" "$WORK/split-import-idx"
+
+        # (c) A unique index over duplicate values cannot be rebuilt: the import fails, names the index, and leaves the
+        #     primary key enabled.
+        sql -d BcpJsonSplitIdx -Q "TRUNCATE TABLE split.Descending; CREATE UNIQUE NONCLUSTERED INDEX UX_Dup ON split.Descending (Val);"
+        if bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitIdx --file-format json --disable-indexes --truncate-target --source-path "$sj" --source-file 'split.Descending.part*.json' > "$WORK/split-import-dup.log" 2>&1; then
+            cat "$WORK/split-import-dup.log"; echo "::error::The import succeeded although UX_Dup could not be rebuilt"; exit 1
+        fi
+        cat "$WORK/split-import-dup.log"
+        grep -qF "split.Descending: Could not rebuild index UX_Dup" "$WORK/split-import-dup.log" || { echo "::error::The failed rebuild of UX_Dup was not reported"; exit 1; }
+        [ "$(scalar BcpJsonSplitIdx "SELECT CONCAT(is_disabled, '/', (SELECT is_disabled FROM sys.indexes WHERE name = N'UX_Dup')) FROM sys.indexes WHERE name = N'PK_Descending';")" = "0/1" ] \
+            || { echo "::error::Expected PK_Descending enabled and UX_Dup disabled"; exit 1; }
+        [ "$(scalar BcpJsonSplitIdx "SELECT COUNT(*) FROM split.Descending;")" = "20000" ] || { echo "::error::split.Descending rows"; exit 1; }
+        echo "Unique index over duplicates: reported, left disabled; the primary key stays enabled."
+
+        # (e) BCP parts: each part is a bcp in with the table's shared format file and logs named after the part.
+        create_target_db BcpJsonSplitBcp
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitBcp --file-format bcp --max-tasks 4 --source-path "$sb" --source-file '*.bcp' | tee "$WORK/split-import-bcp.log"
+        grep -qF "split.Big: 4 parts, loading one after another (clustered index)." "$WORK/split-import-bcp.log" || { echo "::error::split.Big BCP parts did not load one after another"; exit 1; }
+        [ -f "$sb/split.Big.part0001_import_output.log" ] || { echo "::error::No import log named after the part"; ls "$sb"; exit 1; }
+        sbs="$WORK/source-json-split-bcp"
+        rm -rf "$sbs"
+        mkdir -p "$sbs"
+        for t in Big Text Descending Parted; do cp "$src/split.$t.json" "$sbs/"; done
+        export_json BcpJsonSplitBcp "$WORK/split-import-bcp" --include-tables split.Big,split.Text,split.Descending,split.Parted
+        compare_exact "$sbs" "$WORK/split-import-bcp"
         ;;
 
     *)

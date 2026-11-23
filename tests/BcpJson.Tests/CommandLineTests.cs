@@ -84,6 +84,13 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Import_disable_indexes_defaults_to_false()
+        {
+            Assert.False(Parsed<ImportOptions>("import", "--file-format", "json", "--source-file", "*.json").DisableIndexes);
+            Assert.True(Parsed<ImportOptions>("import", "--file-format", "json", "--source-file", "*.json", "--disable-indexes").DisableIndexes);
+        }
+
+        [Fact]
         public void Table_lock_and_snapshot_options()
         {
             Assert.False(Parsed<ImportOptions>("import", "--file-format", "bcp", "--source-file", "x.bcp").NoTableLock);
