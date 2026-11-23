@@ -106,9 +106,11 @@ ORDER BY i.index_id;";
                 }
                 catch (Exception ex)
                 {
+                    // The first error says why; SQL Server adds "The statement has been terminated." on a line of its own.
+                    string reason = ex is SqlException sqlEx && sqlEx.Errors.Count > 0 ? sqlEx.Errors[0].Message : ex.Message;
                     failures++;
                     PostToConsole(string.Format("{0}: Could not rebuild index {1}: {2}. It is still disabled; run {3}.",
-                        label, index.Name, ex.Message.TrimEnd('.'), statement), InfoLevel.Error);
+                        label, index.Name, reason.Trim().TrimEnd('.'), statement), InfoLevel.Error);
                 }
             }
             PostToConsole(string.Format("{0}: Rebuilt {1} index(es).", label, rebuilt));

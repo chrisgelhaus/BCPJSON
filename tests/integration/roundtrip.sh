@@ -651,7 +651,7 @@ case "${1:-}" in
             cat "$WORK/split-import-dup.log"; echo "::error::The import succeeded although UX_Dup could not be rebuilt"; exit 1
         fi
         cat "$WORK/split-import-dup.log"
-        grep -qF "split.Descending: Could not rebuild index UX_Dup" "$WORK/split-import-dup.log" || { echo "::error::The failed rebuild of UX_Dup was not reported"; exit 1; }
+        grep -qE "split\.Descending: Could not rebuild index UX_Dup: .*duplicate key.* It is still disabled; run ALTER INDEX \[UX_Dup\] ON \[split\]\.\[Descending\] REBUILD\.$" "$WORK/split-import-dup.log" || { echo "::error::The failed rebuild of UX_Dup was not reported"; exit 1; }
         [ "$(scalar BcpJsonSplitIdx "SELECT CONCAT(is_disabled, '/', (SELECT is_disabled FROM sys.indexes WHERE name = N'UX_Dup')) FROM sys.indexes WHERE name = N'PK_Descending';")" = "0/1" ] \
             || { echo "::error::Expected PK_Descending enabled and UX_Dup disabled"; exit 1; }
         [ "$(scalar BcpJsonSplitIdx "SELECT COUNT(*) FROM split.Descending;")" = "20000" ] || { echo "::error::split.Descending rows"; exit 1; }
