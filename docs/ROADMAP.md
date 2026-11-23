@@ -32,7 +32,13 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
   - **Atomic files:** exports write `<file>.partial` and rename when complete; import ignores `.partial` files.
   - **Manifest + verify + resume:** `bcpjson-manifest.json` per export (tool, format, server, database, snapshot, start/completion, per-table rows and file size/SHA-256), saved after every table. New `verify` verb checks a folder against it without a database. `export --resume` skips tables already intact (same format/database/query required).
   - CI: `roundtrip.sh resilience` checks the manifest, catches a same-size edit and a missing file with `verify`, resumes a simulated crash (skipped files untouched, no `.partial` left, data identical), refuses a mismatched resume, and proves connection retry by renaming a database into place 20 s after the export starts (SqlClient's own single login retry after 10 s is not enough) (control: `--retries 0` fails). BCP and snapshot exports are verified too.
-- Remaining ideas from that review: `SqlBulkCopy` column order hints, linux-arm64/macOS builds, SRID-preserving spatial JSON.
+- The remaining ideas from that review (order hints, Arm64/macOS builds, SRIDs in JSON) are done: see "Done after v2.5.1".
+
+## Done after v2.5.1
+
+- **SRIDs in JSON.** geography/geometry with a non-default SRID are exported as `SRID=n;<wkt>` (the PostGIS convention) and imported with `STGeomFromText(wkt, n)`. Default SRIDs (4326 / 0) are written as before, so older exports still diff cleanly and import unchanged. CI data has SRIDs 4269, 4258, 27700 and 3857, Z and M values.
+- **Order hints for JSON import.** The manifest records the primary key each JSON table export is sorted by (`orderedBy`). Import adds `SqlBulkCopy.ColumnOrderHints` when the target's clustered key is identical (columns, types, directions, collations), so SQL Server skips the sort. Not for `copy` (it loads heaps and builds indexes afterwards) or the CLR staging path. SQL Server rejects a load that breaks the hint, hence the strict match; sql_variant keys never match. CI: `rt.OrderedKey` (case-sensitive collation, descending column) must get the hint; a target clustered on another column must not.
+- **linux-arm64 and osx-arm64 release packages**, built and smoke-tested on `ubuntu-24.04-arm` and `macos-latest`. No database tests there (SQL Server containers are x64-only). The macOS binary is ad-hoc signed by the SDK but not notarized (signing is deferred), so the README explains removing the quarantine flag. No osx-x64: GitHub is retiring Intel macOS runners.
 
 ## Done after v2.5.0 (released in v2.5.1)
 

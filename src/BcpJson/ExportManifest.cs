@@ -144,6 +144,50 @@ namespace bcpJson
 
         public DateTime Exported { get; set; }
         public List<ManifestFile> Files { get; set; } = new List<ManifestFile>();
+
+        /// <summary>
+        /// JSON table exports: the primary key the rows are sorted by. Import uses it to tell SQL Server the rows arrive
+        /// in clustered index order. Null (and left out of the file) for BCP, query exports, tables without a primary key
+        /// and exports from before this was recorded.
+        /// </summary>
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public List<ManifestKeyColumn> OrderedBy { get; set; }
+    }
+
+    /// <summary>One key column: name, system type, direction and collation (null for non-string types).</summary>
+    internal sealed class ManifestKeyColumn
+    {
+        public string Column { get; set; }
+        public string Type { get; set; }
+        public bool Descending { get; set; }
+        public string Collation { get; set; }
+
+        /// <summary>
+        /// True when rows sorted by <paramref name="sortedBy"/> are also in <paramref name="clustered"/> order: the same
+        /// columns in the same order, with the same type, direction and collation (collation decides string order).
+        /// sql_variant keys never match: values re-imported as nvarchar can sort differently.
+        /// </summary>
+        public static bool SameOrder(IReadOnlyList<ManifestKeyColumn> sortedBy, IReadOnlyList<ManifestKeyColumn> clustered)
+        {
+            if (sortedBy == null || clustered == null || sortedBy.Count == 0 || sortedBy.Count != clustered.Count)
+            {
+                return false;
+            }
+            for (int i = 0; i < sortedBy.Count; i++)
+            {
+                ManifestKeyColumn a = sortedBy[i], b = clustered[i];
+                if (a == null || b == null
+                    || !string.Equals(a.Column, b.Column, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(a.Type, b.Type, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(a.Type, "sql_variant", StringComparison.OrdinalIgnoreCase)
+                    || a.Descending != b.Descending
+                    || !string.Equals(a.Collation ?? string.Empty, b.Collation ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
     }
 
     internal sealed class ManifestFile

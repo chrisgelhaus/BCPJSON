@@ -45,8 +45,14 @@ Download the package for your platform from the [Releases page](https://github.c
 | Windows x64 | `bcpjson-<version>-win-x64.zip` |
 | Windows Arm64 | `bcpjson-<version>-win-arm64.zip` |
 | Linux x64 | `bcpjson-<version>-linux-x64.tar.gz` |
+| Linux Arm64 | `bcpjson-<version>-linux-arm64.tar.gz` |
+| macOS (Apple Silicon) | `bcpjson-<version>-osx-arm64.tar.gz` |
 
 Each package holds a single self-contained executable (`bcpjson.exe` / `bcpjson`) plus `LICENSE`, `NOTICE` and this README. Unpack it anywhere and add the folder to `PATH`.
+
+Every release is round-trip tested against SQL Server on Linux x64. The Arm64 and macOS builds are built and smoke-tested on their own platforms, but SQL Server containers run only on x64, so they are not tested against a database in CI.
+
+**macOS:** the executable is not signed with an Apple Developer ID or notarized, so macOS blocks a copy downloaded with a browser ("cannot be opened because the developer cannot be verified"). After checking the download against `SHA256SUMS`, remove the quarantine flag: `xattr -d com.apple.quarantine bcpjson`. Files downloaded with `curl` are not quarantined. For BCP files and spatial-type copies, install `bcp` with Homebrew (`brew install mssql-tools18` from Microsoft's `microsoft/mssql-release` tap).
 
 To check a download, compare it with `SHA256SUMS` from the same release, or verify where and how it was built (requires the [GitHub CLI](https://cli.github.com/)):
 
@@ -65,7 +71,7 @@ dotnet test                                           # unit tests, no database 
 dotnet publish src/BcpJson -c Release -r win-x64 -o publish   # self-contained single-file publish\bcpjson.exe
 ```
 
-Use `-r win-arm64` or `-r linux-x64` for the other platforms.
+Use `-r win-arm64`, `-r linux-x64`, `-r linux-arm64` or `-r osx-arm64` for the other platforms.
 
 ## Usage
 
@@ -403,13 +409,16 @@ Each export writes `bcpjson-manifest.json` into the export folder. It records th
       "name": "Sales.Customer",
       "rows": 19820,
       "exported": "2026-11-21T02:00:04Z",
-      "files": [ { "name": "Sales.Customer.json", "bytes": 4120334, "sha256": "9f2c..." } ]
+      "files": [ { "name": "Sales.Customer.json", "bytes": 4120334, "sha256": "9f2c..." } ],
+      "orderedBy": [ { "column": "CustomerID", "type": "int", "descending": false, "collation": null } ]
     }
   ]
 }
 ```
 
-The manifest is saved after every table, so it always reflects what has finished. `completed` is set only when the whole export succeeded. `import` skips the manifest, so `--source-file "*.json"` still works.
+The manifest is saved after every table, so it always reflects what has finished. `completed` is set only when the whole export succeeded. `import` does not load the manifest as data, so `--source-file "*.json"` still works.
+
+`orderedBy` (JSON exports of tables with a primary key) is the key the rows are sorted by. JSON import reads it: when the target table's clustered index has exactly that key (the same columns, types, directions and collations), it tells SQL Server the rows already arrive in clustered index order, so the load needs no sort. That makes large loads into an empty clustered table noticeably faster. SQL Server checks the order and would fail the load if it were wrong, so for any other target, including a JSON file without a manifest, the import runs as before. The console says `Rows are in clustered index order; loading with an order hint.` when it applies.
 
 ### Verifying an export
 
@@ -465,7 +474,7 @@ Each file is a JSON array with one object per row, one row per line:
 - Dates and times are ISO 8601; `datetimeoffset` keeps its offset.
 - `decimal`/`numeric` are JSON numbers with every digit, up to the full 38 digits of precision (beyond what .NET's `decimal` holds), and are read back exactly. A JSON parser in another tool may round very long numbers.
 - `binary`/`varbinary`/`image` are base64.
-- geography, geometry and hierarchyid are written as text (`POINT (-122.3 47.6)`, `/1/3/`) and parsed back on import.
+- geography, geometry and hierarchyid are written as text (`POINT (-122.3 47.6)`, `/1/3/`) and parsed back on import. A geography or geometry value whose SRID is not the default (4326 for geography, 0 for geometry) gets an SRID prefix, as in PostGIS: `SRID=27700;POINT (530000 180000)`. Import rebuilds it with that SRID. Values with the default SRID have no prefix, so they look exactly as in older exports, and older files import as before.
 - NULL is written explicitly as `null`.
 
 ## Known limitations
@@ -473,7 +482,6 @@ Each file is a JSON array with one object per row, one row per line:
 - **Passwords on the command line.** bcp only accepts SQL passwords via `-P`, so they are visible in the process list while bcp runs. Prefer Windows Authentication.
 - **BCP character format uses `|` as the field terminator**; data containing `|` or line breaks will not round-trip through BCP files. Use JSON for such tables.
 - BCP exports (`bcp out`) are not ordered, so BCP files are not reliably diff-able; JSON files are.
-- geography/geometry exported to JSON lose their SRID (re-imported as 4326 / 0).
 - `sql_variant` values are re-imported as `nvarchar`.
 - `copy --source-query` is not supported.
 - `copy` recreates keys, indexes and check constraints (and foreign keys and triggers on request), but not other objects such as views, procedures, functions or DDL triggers; indexes are placed on the target's default filegroup.

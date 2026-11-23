@@ -165,6 +165,28 @@ namespace bcpJson
             return totalrowCount;
         }
 
+        /// <summary>The export manifest next to the files being imported, or null (none, or unreadable: import works without it).</summary>
+        private static ExportManifest ManifestForImport(string folder)
+        {
+            try
+            {
+                return ExportManifest.Load(folder);
+            }
+            catch (Exception ex)
+            {
+                PostToConsole(string.Format("Ignoring {0}: {1}", ExportManifest.FileName, ex.Message), InfoLevel.Warning);
+                return null;
+            }
+        }
+
+        /// <summary>The key the manifest says this file's rows are sorted by, or null.</summary>
+        internal static List<ManifestKeyColumn> SortKeyOf(ExportManifest manifest, string fileName)
+        {
+            return manifest?.Tables
+                .FirstOrDefault(t => t.Files != null && t.Files.Any(f => string.Equals(f.Name, fileName, StringComparison.OrdinalIgnoreCase)))
+                ?.OrderedBy;
+        }
+
         private static void DeleteTempFolder(string folder)
         {
             if (folder == null)
@@ -184,13 +206,14 @@ namespace bcpJson
         private static long ImportFromJSON(ImportOptions options)
         {
             long totalrowCount = 0;
+            ExportManifest manifest = ManifestForImport(options.SourcePath);
 
             Parallel.ForEach(FindSourceFiles(options), Parallelism(options.MaxParallelTasks), file =>
             {
                 string tableName = string.IsNullOrEmpty(options.TargetTable) ? ImportBaseName(file.Name) : options.TargetTable;
                 try
                 {
-                    long rows = ImportJsonFile(file.FullName, tableName, options);
+                    long rows = ImportJsonFile(file.FullName, tableName, options, SortKeyOf(manifest, file.Name));
                     Interlocked.Add(ref totalrowCount, rows);
                     PostToConsole(string.Format("{0}: {1:N0} (Import Complete)", tableName, rows), InfoLevel.Success);
                 }
@@ -207,9 +230,11 @@ namespace bcpJson
         /// Streams one exported JSON file (an array of row objects; .gz files are decompressed on the fly) into an
         /// existing table: SqlBulkCopy reads the rows through a <see cref="JsonRowReader"/>, committing every
         /// --batch-size rows. Values are converted using the target column types. Tables with CLR-type columns (geography, geometry,
-        /// hierarchyid) are loaded through a #temp staging table holding those columns as text, then inserted with ::Parse().
+        /// hierarchyid) are loaded through a #temp staging table holding those columns as text, then inserted with
+        /// ::Parse() (<see cref="ClrFromText"/>). When <paramref name="sortedBy"/> (from the manifest) matches the target's
+        /// clustered index, SqlBulkCopy gets column order hints so SQL Server can skip sorting the rows.
         /// </summary>
-        private static long ImportJsonFile(string filePath, string tableName, ImportOptions options)
+        private static long ImportJsonFile(string filePath, string tableName, ImportOptions options, List<ManifestKeyColumn> sortedBy)
         {
             string connectionString = options.GetTargetConnectionString();
             string[] target = GetTableObject(tableName, connectionString);
@@ -262,6 +287,22 @@ namespace bcpJson
                         bulkCopy.ColumnMappings.Add(column.Name, column.Name);
                     }
 
+                    // Only for the real table (the staging table is a heap) and only when the export's sort key is
+                    // exactly the clustered key: SQL Server checks the hint and fails the load if rows are out of order.
+                    if (!useStaging && sortedBy != null)
+                    {
+                        List<ManifestKeyColumn> clustered = ReadKeyColumns(conn, int.Parse(target[2], CultureInfo.InvariantCulture), KeyKind.Clustered);
+                        if (ManifestKeyColumn.SameOrder(sortedBy, clustered)
+                            && clustered.All(k => bulkColumns.Any(c => string.Equals(c.Name, k.Column, StringComparison.OrdinalIgnoreCase))))
+                        {
+                            foreach (ManifestKeyColumn key in clustered)
+                            {
+                                bulkCopy.ColumnOrderHints.Add(key.Column, key.Descending ? SortOrder.Descending : SortOrder.Ascending);
+                            }
+                            PostToConsole(string.Format("{0}: Rows are in clustered index order; loading with an order hint.", label));
+                        }
+                    }
+
                     using (StreamReader text = FileCompression.OpenText(filePath))
                     using (var reader = new JsonRowReader(text, bulkColumns.Select(c => c.Name).ToList(), bulkColumns.Select(c => c.Type).ToList()))
                     {
@@ -275,7 +316,7 @@ namespace bcpJson
                     bool hasIdentity = columns.Any(c => c.IsIdentity);
                     string columnList = string.Join(", ", columns.Select(c => QuoteName(c.Name)));
                     string selectList = string.Join(", ", columns.Select(c => c.IsClrType
-                        ? c.TypeName + "::Parse(" + QuoteName(c.Name) + ")"
+                        ? ClrFromText(c.TypeName, QuoteName(c.Name))
                         : QuoteName(c.Name)));
 
                     string sql = (hasIdentity ? "SET IDENTITY_INSERT " + qualifiedName + " ON; " : string.Empty)
@@ -287,6 +328,24 @@ namespace bcpJson
 
                 return rows;
             }
+        }
+
+        /// <summary>
+        /// T-SQL turning a staged text column back into its CLR type. geography/geometry text may carry an "SRID=n;"
+        /// prefix (export writes one when the SRID is not ::Parse()'s default), which becomes STGeomFromText(wkt, n).
+        /// </summary>
+        internal static string ClrFromText(string typeName, string column)
+        {
+            string parse = typeName + "::Parse(" + column + ")";
+            if (!string.Equals(typeName, "geography", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(typeName, "geometry", StringComparison.OrdinalIgnoreCase))
+            {
+                return parse;
+            }
+            string semicolon = "CHARINDEX(N';', " + column + ")";
+            return "CASE WHEN " + column + " LIKE N'SRID=%;%' THEN " + typeName + "::STGeomFromText(SUBSTRING(" + column + ", "
+                + semicolon + " + 1, 2147483647), CAST(SUBSTRING(" + column + ", 6, " + semicolon + " - 6) AS INT)) ELSE "
+                + parse + " END";
         }
 
         private static List<ImportColumn> GetImportColumns(SqlConnection conn, int objectId)

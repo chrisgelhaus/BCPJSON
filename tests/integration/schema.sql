@@ -70,6 +70,16 @@ CREATE TABLE rt.Empty
     Id INT NOT NULL PRIMARY KEY
 );
 
+/* Clustered key with a case-sensitive string and a descending column: JSON import loads it with an order hint, which
+   SQL Server rejects if the exported order differs from the clustered index order. */
+CREATE TABLE rt.OrderedKey
+(
+    Code VARCHAR(10) COLLATE Latin1_General_CS_AS NOT NULL,
+    Seq  INT                                      NOT NULL,
+    Note NVARCHAR(20)                             NULL,
+    CONSTRAINT PK_OrderedKey PRIMARY KEY CLUSTERED (Code ASC, Seq DESC)
+);
+
 CREATE TABLE plain.Numbers
 (
     Id     INT              NOT NULL PRIMARY KEY,

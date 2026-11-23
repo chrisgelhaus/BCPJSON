@@ -18,14 +18,22 @@ namespace bcpJson
         /// <summary>
         /// Per-table metadata for JSON export: the column list and a deterministic sort order.
         /// CLR types (geography, geometry, hierarchyid) are written as text via ToString() so they stay diffable
-        /// and can be re-imported with ::Parse(). Rows are ordered by the primary key, or by every sortable column
+        /// and can be re-imported with ::Parse(). geography/geometry values whose SRID is not the one ::Parse() assumes
+        /// (4326 / 0) are written as "SRID=n;WKT" (see <see cref="ClrFromText"/>). Rows are ordered by the primary key, or by every sortable column
         /// when there is no primary key. Keep CustomSelect.sql in sync with this text.
         /// </summary>
         private const string TableMetadataSql = @"SET NOCOUNT ON;
 DECLARE @Columns NVARCHAR(MAX), @SortOrder NVARCHAR(MAX);
 
 SELECT   @Columns = COALESCE(@Columns + N', ', N'') +
-                    CASE WHEN sc.system_type_id = 240
+                    CASE WHEN sc.system_type_id = 240 AND TYPE_NAME(sc.user_type_id) IN (N'geography', N'geometry')
+                         /* SRIDs other than the one ::Parse() assumes (geography 4326, geometry 0) get an SRID=n; prefix. */
+                         THEN N'CASE WHEN ' + QUOTENAME(sc.name) + N'.STSrid = '
+                              + CASE TYPE_NAME(sc.user_type_id) WHEN N'geography' THEN N'4326' ELSE N'0' END
+                              + N' THEN ' + QUOTENAME(sc.name) + N'.ToString() ELSE N''SRID='' + CAST('
+                              + QUOTENAME(sc.name) + N'.STSrid AS NVARCHAR(11)) + N'';'' + ' + QUOTENAME(sc.name)
+                              + N'.ToString() END AS ' + QUOTENAME(sc.name)
+                         WHEN sc.system_type_id = 240
                          THEN QUOTENAME(sc.name) + N'.ToString() AS ' + QUOTENAME(sc.name)
                          ELSE QUOTENAME(sc.name)
                     END
@@ -104,9 +112,11 @@ SELECT @Columns, @SortOrder;";
                 try
                 {
                     // Exporting a table only rewrites its file, so a transient failure retries the whole table.
-                    long rows = WithRetries(table.DisplayName, options.Retries,
+                    var (rows, orderedBy) = WithRetries(table.DisplayName, options.Retries,
                         () => ExportTableToJson(options, table, Path.Combine(options.exportPath, fileName)), IsTransientSqlError);
-                    manifest.Record(ManifestEntry(table.DisplayName, rows, options.exportPath, fileName), options.exportPath);
+                    ManifestTable entry = ManifestEntry(table.DisplayName, rows, options.exportPath, fileName);
+                    entry.OrderedBy = orderedBy;
+                    manifest.Record(entry, options.exportPath);
                     Interlocked.Add(ref totalrowCount, rows);
                     PostToConsole(string.Format("{0}: {1:N0} (Complete)", table.DisplayName, rows), InfoLevel.Success);
                 }
@@ -119,8 +129,11 @@ SELECT @Columns, @SortOrder;";
             return totalrowCount;
         }
 
-        /// <summary>Writes one table to &lt;file&gt;.partial and renames it to <paramref name="filePath"/> when complete.</summary>
-        private static long ExportTableToJson(ExportOptions options, TableRef table, string filePath)
+        /// <summary>
+        /// Writes one table to &lt;file&gt;.partial and renames it to <paramref name="filePath"/> when complete. Returns the
+        /// row count and the primary key the rows are sorted by (null without one), which import uses for order hints.
+        /// </summary>
+        private static (long Rows, List<ManifestKeyColumn> OrderedBy) ExportTableToJson(ExportOptions options, TableRef table, string filePath)
         {
             try
             {
@@ -128,6 +141,7 @@ SELECT @Columns, @SortOrder;";
                 {
                     conn.Open();
                     string select = BuildTableSelect(conn, table, options.NoLock);
+                    List<ManifestKeyColumn> orderedBy = ReadKeyColumns(conn, table.ObjectId, KeyKind.PrimaryKey);
 
                     using (var cmd = new SqlCommand(select, conn))
                     {
@@ -136,7 +150,7 @@ SELECT @Columns, @SortOrder;";
                         {
                             long rows = WriteJsonRows(reader, PartialPath(filePath), table.DisplayName, options.GzipLevel);
                             CommitPartial(filePath);
-                            return rows;
+                            return (rows, orderedBy.Count > 0 ? orderedBy : null);
                         }
                     }
                 }
@@ -146,6 +160,48 @@ SELECT @Columns, @SortOrder;";
                 DiscardPartial(filePath);
                 throw;
             }
+        }
+
+        internal enum KeyKind
+        {
+            /// <summary>The primary key, which JSON export sorts by.</summary>
+            PrimaryKey,
+
+            /// <summary>The clustered rowstore index, the order SQL Server stores rows in.</summary>
+            Clustered
+        }
+
+        /// <summary>The key columns of a table's primary key or clustered index, in key order; empty when it has none.</summary>
+        private static List<ManifestKeyColumn> ReadKeyColumns(SqlConnection conn, int objectId, KeyKind kind)
+        {
+            string sql = @"SELECT c.name, TYPE_NAME(c.system_type_id), ic.is_descending_key, c.collation_name
+FROM sys.indexes i
+     INNER JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
+     INNER JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+WHERE i.object_id = @objectId
+      AND " + (kind == KeyKind.PrimaryKey ? "i.is_primary_key = 1" : "i.type = 1") + @"
+      AND ic.key_ordinal > 0
+ORDER BY ic.key_ordinal;";
+
+            var key = new List<ManifestKeyColumn>();
+            using (var cmd = new SqlCommand(sql, conn))
+            {
+                cmd.Parameters.Add("@objectId", SqlDbType.Int).Value = objectId;
+                using (var reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        key.Add(new ManifestKeyColumn
+                        {
+                            Column = reader.GetString(0),
+                            Type = reader.GetString(1),
+                            Descending = reader.GetBoolean(2),
+                            Collation = reader.IsDBNull(3) ? null : reader.GetString(3)
+                        });
+                    }
+                }
+            }
+            return key;
         }
 
         /// <summary>
