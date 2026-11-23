@@ -25,6 +25,13 @@ namespace bcpJson.Tests
             Assert.Equal(expected, Program.UnquotedLabel(input));
         }
 
+        [Fact]
+        public void RebuildNotStartedMessage_names_every_index_and_the_table()
+        {
+            Assert.Equal("split.Big: Could not rebuild indexes IX_Big_Stamp, UX_Big_Code: Login failed. They may still be disabled; run ALTER INDEX <name> ON [split].[Big] REBUILD for each.",
+                Program.RebuildNotStartedMessage("split.Big", "[split].[Big]", new[] { "IX_Big_Stamp", "UX_Big_Code" }, "Login failed.\n"));
+        }
+
         [Theory]
         [InlineData("abc", "N'abc'")]
         [InlineData("O'Brien", "N'O''Brien'")]

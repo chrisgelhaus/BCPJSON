@@ -131,33 +131,24 @@ namespace bcpJson
                 return 0;
             }
 
-            try
+            // The action catches and reports everything itself, so RunLargestFirst has no exception to collect.
+            WorkQueue.RunLargestFirst(items, i => i.Size, options.MaxParallelTasks, item =>
             {
-                WorkQueue.RunLargestFirst(items, i => i.Size, options.MaxParallelTasks, item =>
+                try
                 {
-                    try
+                    item.Table.Work.Run(() =>
                     {
-                        item.Table.Work.Run(() =>
+                        foreach (FileInfo file in item.Files)
                         {
-                            foreach (FileInfo file in item.Files)
-                            {
-                                Interlocked.Add(ref totalrowCount, loadFile(item.Table, file));
-                            }
-                        });
-                    }
-                    catch (Exception ex)
-                    {
-                        PostToConsole(ex.Message, InfoLevel.Error);
-                    }
-                });
-            }
-            catch (AggregateException ex)
-            {
-                foreach (Exception inner in ex.InnerExceptions)
-                {
-                    PostToConsole(inner.Message, InfoLevel.Error);
+                            Interlocked.Add(ref totalrowCount, loadFile(item.Table, file));
+                        }
+                    });
                 }
-            }
+                catch (Exception ex)
+                {
+                    PostToConsole(ex.Message, InfoLevel.Error);
+                }
+            });
             return totalrowCount;
         }
 
@@ -166,6 +157,7 @@ namespace bcpJson
         {
             var byName = files.ToDictionary(f => f.Name, StringComparer.Ordinal);
             var items = new List<ImportItem>();
+            var firstFileOfTable = new Dictionary<int, string>();
             using (var conn = SqlConnectionFactory.Create(options.GetTargetConnectionString()))
             {
                 conn.Open();
@@ -174,7 +166,7 @@ namespace bcpJson
                     List<FileInfo> groupFiles = group.Files.Select(n => byName[n]).ToList();
                     try
                     {
-                        items.AddRange(PlanImportTable(conn, options, group.TableName, groupFiles, json));
+                        items.AddRange(PlanImportTable(conn, options, group.TableName, groupFiles, json, firstFileOfTable));
                     }
                     catch (Exception ex)
                     {
@@ -185,7 +177,13 @@ namespace bcpJson
             return items;
         }
 
-        private static List<ImportItem> PlanImportTable(SqlConnection conn, ImportOptions options, string tableName, List<FileInfo> files, bool json)
+        /// <summary>
+        /// Plans one group of files. <paramref name="firstFileOfTable"/> maps each target already planned to its first
+        /// file: a second group resolving to the same table (e.g. T.json and dbo.T.json) is refused, because its
+        /// truncation and load would race the first group's.
+        /// </summary>
+        private static List<ImportItem> PlanImportTable(SqlConnection conn, ImportOptions options, string tableName, List<FileInfo> files, bool json,
+            Dictionary<int, string> firstFileOfTable)
         {
             string[] target = GetTableObject(tableName, conn);
             if (target == null)
@@ -211,6 +209,13 @@ namespace bcpJson
                 Table = target[1],
                 ObjectId = int.Parse(target[2], CultureInfo.InvariantCulture)
             };
+
+            if (firstFileOfTable.TryGetValue(table.ObjectId, out string firstFile))
+            {
+                PostToConsole(string.Format("{0}: files {1} and {2} both load into this table; import them separately.", table.Label, firstFile, files[0].Name), InfoLevel.Error);
+                return new List<ImportItem>();
+            }
+            firstFileOfTable[table.ObjectId] = files[0].Name;
 
             if (!json)
             {
@@ -299,10 +304,24 @@ namespace bcpJson
         private static void RebuildDisabledIndexes(ImportOptions options, ImportTable table, List<IndexInfo> toDisable)
         {
             var ids = new HashSet<int>(toDisable.Select(i => i.IndexId));
-            using (var conn = SqlConnectionFactory.Create(options.GetTargetConnectionString()))
+            SqlConnection conn = null;
+            List<IndexInfo> disabled;
+            try
             {
+                conn = SqlConnectionFactory.Create(options.GetTargetConnectionString());
                 conn.Open();
-                List<IndexInfo> disabled = ReadIndexes(conn, table.ObjectId).Where(i => i.IsDisabled && ids.Contains(i.IndexId)).ToList();
+                disabled = ReadIndexes(conn, table.ObjectId).Where(i => i.IsDisabled && ids.Contains(i.IndexId)).ToList();
+            }
+            catch (Exception ex)
+            {
+                // Reported here, not thrown: TableWork drops after's exception when the load failed too.
+                conn?.Dispose();
+                PostToConsole(RebuildNotStartedMessage(table.Label, table.QualifiedName, toDisable.Select(i => i.Name), ex.Message), InfoLevel.Error);
+                return;
+            }
+
+            using (conn)
+            {
                 if (disabled.Count > 0)
                 {
                     RebuildIndexes(conn, table.QualifiedName, disabled);

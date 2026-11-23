@@ -635,6 +635,19 @@ case "${1:-}" in
         [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.Big;")" = "200000" ] || { echo "::error::split.Big does not hold 200,000 rows after two truncating imports"; exit 1; }
         echo "--truncate-target: one truncation per table, 200,000 rows."
 
+        # Two file names resolving to one table are refused (the second group's truncate would race the first's load).
+        two="$WORK/split-two-names"
+        rm -rf "$two"
+        mkdir -p "$two"
+        cp "$sj/split.Heap.json" "$two/"
+        cp "$sj/split.Heap.json" "$two/[split].[Heap].json"
+        if bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --truncate-target --source-path "$two" --source-file '*.json' > "$WORK/split-two-names.log" 2>&1; then
+            cat "$WORK/split-two-names.log"; echo "::error::Two files for one table were both accepted"; exit 1
+        fi
+        cat "$WORK/split-two-names.log"
+        grep -qF "both load into this table; import them separately." "$WORK/split-two-names.log" || { echo "::error::Two files for one table were not reported"; exit 1; }
+        [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.Heap;")" = "1000" ] || { echo "::error::split.Heap does not hold one file's 1,000 rows"; exit 1; }
+
         # (b) --disable-indexes: nonclustered indexes (not the primary key) are disabled for the load and rebuilt after it.
         create_target_db BcpJsonSplitIdx
         bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitIdx --file-format json --max-tasks 4 --disable-indexes --source-path "$sj" --source-file '*.json' | tee "$WORK/split-import-idx.log"

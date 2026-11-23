@@ -156,6 +156,13 @@ ORDER BY i.index_id;";
             return label.ToString();
         }
 
+        /// <summary>The error when the rebuild could not even start (no connection, or the index list could not be read).</summary>
+        internal static string RebuildNotStartedMessage(string label, string qualifiedName, IEnumerable<string> indexNames, string message)
+        {
+            return string.Format("{0}: Could not rebuild indexes {1}: {2}. They may still be disabled; run ALTER INDEX <name> ON {3} REBUILD for each.",
+                label, string.Join(", ", indexNames), message.Trim().TrimEnd('.'), qualifiedName);
+        }
+
         /// <summary>sys.tables.lock_escalation_desc: TABLE, AUTO or DISABLE.</summary>
         static string LockEscalation(SqlConnection conn, int objectId)
         {
