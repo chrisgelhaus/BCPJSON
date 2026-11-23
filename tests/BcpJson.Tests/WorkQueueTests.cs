@@ -5,12 +5,18 @@
         [Fact]
         public void Before_runs_once_and_after_once_after_the_last_item()
         {
-            int before = 0, after = 0, done = 0, doneAtAfter = -1;
+            int before = 0, after = 0, done = 0, doneAtAfter = -1, beforeMissing = 0;
             var work = new TableWork("t", 8, () => Interlocked.Increment(ref before),
                 () => { Interlocked.Increment(ref after); doneAtAfter = Volatile.Read(ref done); });
 
             WorkQueue.RunLargestFirst(Enumerable.Range(0, 8), i => i, 4,
-                i => work.Run(() => Interlocked.Increment(ref done)));
+                i => work.Run(() =>
+                {
+                    if (Volatile.Read(ref before) != 1) Interlocked.Increment(ref beforeMissing);
+                    Interlocked.Increment(ref done);
+                }));
+
+            Assert.Equal(0, beforeMissing);
 
             Assert.Equal(1, before);
             Assert.Equal(1, after);
@@ -23,16 +29,13 @@
             int after = 0;
             var work = new TableWork("t", 5, null, () => Interlocked.Increment(ref after));
 
-            // Callers catch per item (Parallel.ForEach would stop scheduling after an escaped exception).
-            ApplicationException caught = null;
-            for (int i = 1; i <= 5; i++)
-            {
-                int n = i;
-                try { work.Run(() => { if (n == 3) throw new ApplicationException("boom"); }); }
-                catch (ApplicationException ex) { caught = ex; }
-            }
+            int ran = 0;
+            var ex = Assert.Throws<AggregateException>(() => WorkQueue.RunLargestFirst(Enumerable.Range(1, 5), i => i, 1,
+                i => work.Run(() => { Interlocked.Increment(ref ran); if (i == 3) throw new ApplicationException("boom"); })));
 
-            Assert.NotNull(caught);
+            Assert.Single(ex.InnerExceptions);
+            Assert.IsType<ApplicationException>(ex.InnerExceptions[0]);
+            Assert.Equal(5, ran);
             Assert.Equal(1, after);
         }
 
@@ -48,16 +51,25 @@
         public void Failed_before_skips_items_but_still_runs_after()
         {
             int body = 0, after = 0;
-            var work = new TableWork("dbo.T", 3, () => throw new ApplicationException("nope"), () => after++);
+            var original = new ApplicationException("nope");
+            var work = new TableWork("dbo.T", 3, () => throw original, () => after++);
 
             for (int i = 0; i < 3; i++)
             {
                 var ex = Assert.Throws<InvalidOperationException>(() => work.Run(() => body++));
                 Assert.Contains("preparation failed", ex.Message);
+                Assert.Contains("dbo.T", ex.Message);
+                Assert.Same(original, ex.InnerException);
             }
 
             Assert.Equal(0, body);
             Assert.Equal(1, after);
+        }
+
+        [Fact]
+        public void Items_must_be_positive()
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() => new TableWork("t", 0, null, null));
         }
 
         [Fact]
