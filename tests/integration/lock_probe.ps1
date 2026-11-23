@@ -1,8 +1,12 @@
 # Lock probe: which table lock does a TABLOCK SqlBulkCopy take on a heap, a clustered rowstore table and a
 # clustered columnstore table? Decides whether parts of a split table can load in parallel (LoadPlanning).
 # Needs SQL_SERVER, SQL_PASSWORD (SQL_USER defaults to sa), sqlcmd on PATH, and no published bcpjson.
-# Prints "heap=<mode> clustered=<mode> cci=<mode>"; exits 1 unless heap is BU, clustered is X and cci is the
-# mode recorded below.
+# Prints "heap=<mode> clustered=<mode> cci=<mode>"; exits 1 unless heap is BU (bulk update: loads run in
+# parallel), clustered is exclusive and cci is the mode recorded below.
+# Observed on SQL Server 2019, 2022 and 2025 (Linux containers): heap=BU clustered=Sch-M cci=S+X. The clustered
+# table (split.Big, with nonclustered indexes) takes a schema-modification lock on its first load into an empty
+# table, which excludes everything, so it is as serial as X. The columnstore takes S+X, never BU, so
+# LoadPlanning.ClusteredColumnstoreLoadsInParallel stays false.
 $ErrorActionPreference = 'Stop'
 
 $server = $env:SQL_SERVER
@@ -72,5 +76,5 @@ $cci = Get-LockMode 'split.PartedCci'
 
 & sqlcmd -S $server -U $user -P $pwd -C -Q "ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db];" | Out-Null
 
-$ok = ($heap -eq 'BU') -and ($clustered -eq 'X')
-if (-not $ok) { Write-Host 'Unexpected lock modes: expected heap=BU clustered=X.'; exit 1 }
+$ok = ($heap -eq 'BU') -and ($clustered -in 'X', 'Sch-M') -and ($cci -eq 'S+X')
+if (-not $ok) { Write-Host 'Unexpected lock modes: expected heap=BU clustered=X or Sch-M cci=S+X.'; exit 1 }
