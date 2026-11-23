@@ -30,7 +30,7 @@ A third shape must also work: a **target with no indexes or constraints at all**
 - An automatic size threshold (`--split-above 10GB`). Per-table selection comes first.
 - Dropping the clustered index to load into a heap ("option 2"). Only if the benchmark below shows it winning.
 - Staging tables, including loading large history tables from staging tables over time. Saved for later (see "Later").
-- Splitting heaps, clustered columnstore tables, or ranges over more than the first key column.
+- Splitting unpartitioned heaps or unpartitioned clustered columnstore tables, or ranges over more than the first key column. Partitioned tables of every kind *are* in scope (section 11).
 - Splitting `--source-query` exports, and `copy` tables that go through bcp (geography/geometry/hierarchyid).
 
 ## Anti-goals
@@ -72,7 +72,7 @@ A third shape must also work: a **target with no indexes or constraints at all**
 
 A table can be split when it has a **clustered rowstore index** (`sys.indexes.type = 1`) whose **first key column** has a type that can be compared and passed as a parameter: integer types, `decimal`/`numeric`, `money`/`smallmoney`, date and time types, `char`/`varchar`/`nchar`/`nvarchar`, `uniqueidentifier`, `binary`/`varbinary`, `bit`. That column is the **split column**.
 
-A table that matches `--split-tables` but cannot be split (heap, clustered columnstore, CLR or `sql_variant` split column, empty table, or no histogram) is exported **as one file, as today**, with a warning that says why.
+Partitioned tables follow section 11 instead. A table that matches `--split-tables` but cannot be split (unpartitioned heap or clustered columnstore, CLR or `sql_variant` split column, empty table, or no histogram) is exported **as one file, as today**, with a warning that says why.
 
 When the clustered index is also the primary key (the common case), the parts are in exactly the order of today's single JSON file, so the parts joined in order equal the unsplit export. When the clustered index is not the primary key, each part is still sorted by the primary key as today, but the joined parts are not one sorted sequence. This is correct, just less diffable, and it is documented.
 
@@ -169,7 +169,39 @@ BCP import follows the same steps and modes (`bcp in` per part with `-h "TABLOCK
 - **Existing target:** the same load-mode table as import (section 9; no `--disable-indexes` for copy in this design).
 - Tables copied through bcp (CLR types) are not split.
 
-### 11. Benchmark (decides option 2 later)
+### 11. Partitioned tables
+
+**What is different about them.** Each partition is stored as its own B-tree, heap or columnstore. A range predicate on the partitioning column makes SQL Server read only the matching partitions (partition elimination). So reading one partition is a contiguous scan even when the partitioning column is *not* the first clustered key column, and even for heaps and clustered columnstore tables. The boundaries are exact (`sys.partition_range_values`, RANGE LEFT or RIGHT) and so are the row counts per partition (`sys.partitions`). No statistics are needed.
+
+Methods considered, and what this design does with each:
+
+| Method | What it gives | Decision |
+|---|---|---|
+| **Partition-aligned ranges** for export and copy | Exact, cheap ranges; also makes partitioned heaps and columnstore tables splittable | **In this design** |
+| Load modes for **partitioned targets** | Correct parallel/sequential choice, lock escalation guidance | **In this design** (rules below) |
+| **Partition switching** from staging tables | Truly parallel loads *with* indexes: each staging table is loaded and indexed on its own, then switched in (metadata only) | **Later**, as the first part of the staging-tables work |
+| **Partition-scoped truncate and partial exports** (`TRUNCATE TABLE ... WITH (PARTITIONS (...))`, export only chosen partitions) | Reload or back up only recent partitions of a history table | **Later** |
+| **Sub-splitting one huge partition** (histogram ranges inside it) | Parallelism when most rows sit in one partition | **Later** |
+| `copy` **recreating partition functions and schemes** | Partitioned targets from `copy` (today copy creates them unpartitioned, indexes without their ON clause) | **Later**; documented as a limitation now |
+
+**Partition-aligned ranges (export and copy).**
+
+- When a table chosen by `--split-tables` is partitioned, its ranges follow **partition boundaries instead of the histogram**. The split column is the partitioning column; its type rules are those of section 2, and a persisted computed partitioning column is fine.
+- **Grouping.** Contiguous partitions are grouped into the requested number of parts by their exact row counts, in partition order. Empty partitions join a neighbour. A partition larger than its fair share becomes a part of its own (not sub-split in this design). Asking for at least as many parts as there are non-empty partitions gives one part per partition.
+- **Predicates** are ranges on the partitioning column (`>=`/`<` or `>`/`<=`, following RANGE LEFT or RIGHT; NULLs go to partition 1), not `$PARTITION.fn(col) = n`, so partition elimination does not depend on the optimizer recognising the function. As in section 3, the first and last parts are open-ended.
+- **Eligibility.** Partitioned heaps and partitioned clustered columnstore tables become splittable, which section 2 otherwise excludes.
+- **Order of the joined parts.** The parts joined in order equal the unsplit export only when the partitioning column is the first column of the primary key. Otherwise each part is still sorted by the primary key.
+- **Manifest.** `split.kind` is `"partition"` (the histogram kind is `"histogram"`), with the partition function name, `rangeRight`, the boundary values, and the partition numbers in each part. Resume reuses them as in section 7.
+
+**Partitioned targets (import and copy into existing tables).** The load-mode table in section 9 applies unchanged, with these notes:
+
+- A partitioned heap with no enabled indexes loads all parts in parallel with TABLOCK (bulk-update locks), like any heap.
+- A partitioned clustered rowstore table with TABLOCK still loads sequentially: TABLOCK locks the whole table, not one partition.
+- With `--no-table-lock`, parts load in parallel. When the target's `LOCK_ESCALATION` is `AUTO`, locks escalate to the partition rather than the table, so parts that land in different partitions don't block each other. With the default `TABLE`, escalation attempts fail while other parts hold locks, and the loads carry on with row and page locks. bcpJson reports the setting in the log and recommends `AUTO`; it does not change the table.
+- `--disable-indexes` disables and rebuilds whole indexes, all partitions at once: a disabled index cannot be rebuilt one partition at a time.
+- When the target is partitioned with the same boundaries as the manifest's split, each part maps to whole target partitions. This design only logs that fact. Partition switching and partition-scoped truncate, which build on it, are under "Later".
+
+### 12. Benchmark (decides option 2 later)
 
 A manually triggered workflow (`benchmark.yml`, `workflow_dispatch`, not a required check) on the SQL Server 2022 container:
 
@@ -183,11 +215,12 @@ A manually triggered workflow (`benchmark.yml`, `workflow_dispatch`, not a requi
 
 GitHub runners have few cores, so the numbers show direction, not absolute speed. The option 2 decision uses them.
 
-### 12. Tests
+### 13. Tests
 
 - **Unit tests:**
   - parsing `--split-tables` (patterns, part counts, defaults, invalid values; a name containing `:` uses the last `:` followed by digits);
   - choosing boundaries from histogram rows (even and skewed data, fewer steps than parts, duplicate keys, descending);
+  - grouping partitions into parts (empty partitions, one dominant partition, more parts than partitions) and predicates for RANGE LEFT and RIGHT;
   - building range predicates (nullable, first and last parts) and BCP literals per type;
   - part file names and `ImportBaseName`;
   - grouping and ordering parts;
@@ -202,7 +235,8 @@ GitHub runners have few cores, so the numbers show direction, not absolute speed
   - a split request for a heap (one file plus a warning);
   - a nullable split column with NULLs;
   - `rt.OrderedKey` (case-sensitive collation, descending second column; a tiny table, so fewer parts than asked);
-  - the CCI parallel-load lock check.
+  - the CCI parallel-load lock check;
+  - a partitioned table (RANGE RIGHT on a date, clustered primary key `(Id, Date)`, so the partitioning column is not the leading key column, with empty partitions and NULL-free data), and a partitioned heap: split export, joined-row comparison, parallel import into a partitioned heap and sequential import into the partitioned clustered table.
 
 ## Defaults summary
 
@@ -210,7 +244,7 @@ GitHub runners have few cores, so the numbers show direction, not absolute speed
 |---|---|
 | Split | off; per table through `--split-tables` |
 | Parts when not given | 8 (allowed 2 to 200) |
-| Boundaries | statistics histogram of the clustered index |
+| Boundaries | partition boundaries for partitioned tables, else the statistics histogram of the clustered index |
 | `--disable-indexes` | off |
 | Load mode | automatic from the target's shape and table lock (section 9) |
 | Missing `--snapshot` with splitting | warning |
@@ -232,6 +266,7 @@ GitHub runners have few cores, so the numbers show direction, not absolute speed
 - A warning, not an error, when splitting without `--snapshot`.
 - On resume, the manifest's recorded split always wins.
 - The benchmark is a manual workflow, not part of required CI.
+- Partitioned tables are split along partition boundaries (grouped, never sub-split); switching, partition-scoped truncate, partial exports and partitioned `copy` targets wait.
 
 ## Left to the builder
 
@@ -242,8 +277,10 @@ GitHub runners have few cores, so the numbers show direction, not absolute speed
 
 ## Later
 
-- **Staging tables for large history tables:** load parts into staging tables and move them into the history table over time (switch-in or batched inserts). Raised by the owner on 2026-11-23, saved for later.
+- **Staging tables for large history tables:** load parts into staging tables and move them into the history table over time (switch-in or batched inserts). Raised by the owner on 2026-11-23, saved for later. For partitioned targets, start with **partition switching**: load and index one staging table per partition in parallel, add the matching check constraint, `ALTER TABLE ... SWITCH TO ... PARTITION n`. This needs empty target partitions, identical columns and aligned indexes, the same filegroup and a trusted check constraint.
+- **Partition-scoped work:** `TRUNCATE TABLE ... WITH (PARTITIONS (...))` to reload only some partitions, and exporting only chosen partitions (incremental backups of history tables).
+- Sub-splitting a dominant partition, and `copy` recreating partition functions and schemes (and filegroups) on the target.
 - **Option 2** (drop to a heap, recreate the clustered index), if the benchmark shows it faster.
 - An automatic threshold (`--split-above`), per-table `--disable-indexes`, and `--disable-indexes` for `copy` into existing tables.
-- Multi-column ranges for skewed leading keys, and splitting heaps (by partition).
+- Multi-column ranges for skewed leading keys, and splitting unpartitioned heaps.
 - Splitting by row count, if a use case appears.
