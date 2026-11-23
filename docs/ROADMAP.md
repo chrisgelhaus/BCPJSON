@@ -55,22 +55,27 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
   - **`import --batch-size`, default 50,000** (as before for JSON; bcp import was 10,000), 0 = one transaction per file.
   - CI: `roundtrip.sh compression`. gzip JSON export matches the plain export after `zcat`; `.gz` import with 1,000-row batches and with `--batch-size 0`; gzip BCP export and import at `smallest`; verify on compressed exports; resume of a gzip export and refusal to resume it uncompressed. The `json` step covers the streaming import with plain files.
 
-## TODO: extremely large tables
+## Done after v2.6.0 (PR #45, key-range splitting of large tables)
 
-Decide how bcpJson should handle very large tables (hundreds of millions of rows, or files of tens to hundreds of GB). Today the table is the unit of work everywhere, so one huge table:
+Design: `docs/superpowers/specs/2026-11-23-key-range-splitting-design.md` (with an "As built" section). Documented in the README, "Splitting large tables".
 
-- is exported and imported by a single thread (parallelism is across tables), so it sets the length of the whole run;
-- is redone from the start when a transient error triggers a retry, and `--resume` can only skip whole tables;
-- becomes one file, which is slow to copy, hash (`verify`) and diff; BCP with `--compress gzip` also needs room for the uncompressed file;
-- on a heap without a primary key is sorted by every column for the JSON export, which can need a huge sort in tempdb;
-- with `import --batch-size 0` becomes one transaction, which needs log space for the whole file.
+- **`--split-tables pattern[:parts]`** on `export` (JSON and BCP) and `copy`: chosen tables are cut into 2-200 key ranges (default 8) handled as parallel tasks; unnamed tables produce exactly the old files. Ranges come from partition boundaries (partitioned tables) or the clustered key's statistics histogram, interpolated inside steps for number and date/time keys. Tables that cannot be split are exported whole with a warning.
+- **Parts:** `<schema>.<table>.part0001.<ext>[.gz]`; the manifest keeps one entry per table with a `split` object; `verify` reports missing parts; `--resume` and retries work part by part.
+- **Import:** parts load in parallel or one after another depending on the target (`LoadPlanning`); **`--disable-indexes`** disables nonclustered indexes (not the PK or FK-referenced ones), rebuilds them afterwards even after a failed load.
+- **Copy:** parallel source-to-target range streams; copy now creates a partitioned table on a same-named partition scheme when the target has one.
+- **CI:** `roundtrip.sh split`, a lock probe that measured the lock modes of concurrent TABLOCK loads (heap BU, clustered rowstore Sch-M/X, clustered columnstore S+X), and a manual benchmark workflow (`benchmark.yml`).
 
-Options to weigh, with a default for each, as for compression:
+## Backlog: large tables, later
 
-- **Split by key range:** `<schema>.<table>.part0001.json` per range of the clustered key (or PK). Parts export and import in parallel, retry and resume one by one, and show up in the manifest as one table with several files. Open questions: picking ranges (statistics histogram, `NTILE`, fixed key steps), tables without a usable key, and keeping parts in key order so joined parts equal today's single file.
-- **Split by size:** start a new part every N rows or N MB while streaming. Simpler, and works without a key, but parts still come from one reader, so it helps retry, resume and file size rather than speed.
-- **Thresholds:** split only tables above a size such as `--split-above 10GB`, so small tables keep one file and existing exports don't change.
-- Import and `copy` sides: load the parts of one table in parallel (TABLOCK into a heap allows parallel bulk loads; a clustered index does not). For copy, possibly per-range `SqlBulkCopy` streams.
+From the design's "Later" list:
+
+- **Staging tables for large history tables:** load parts into staging tables and move them in over time. First step: **partition switching** (one indexed staging table per partition, loaded in parallel, then `SWITCH`).
+- **Partition-scoped work:** `TRUNCATE TABLE ... WITH (PARTITIONS (...))`, and exporting only chosen partitions (incremental backups of history tables).
+- **Sub-splitting a dominant partition**, and copying partition functions, schemes and filegroups to the target.
+- **Option 2** (load into a heap, then create the clustered index): decide after a 5,000,000-row benchmark run (1,000,000 rows: 5.0 s against 4.8 s with `--disable-indexes`).
+- `--split-above` (automatic size threshold), per-table `--disable-indexes`, and `--disable-indexes` for `copy` into existing tables.
+- **Multi-column ranges** for skewed leading keys (one dominant value), and splitting unpartitioned heaps.
+- Splitting by row count, if a use case appears.
 
 ## Backlog: Entra ID authentication
 

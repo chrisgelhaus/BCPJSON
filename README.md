@@ -25,6 +25,7 @@ After reading about how Facebook backs up its MySQL fleet at scale — and, just
 - **Fast loads by default:** imports and copies take a table lock (`TABLOCK`), which allows minimal logging. Opt out with `--no-table-lock` — see [Table locking](#table-locking).
 - **Point-in-time exports:** `--snapshot` reads every table from a database snapshot, so a long export or copy reflects one moment — see [Consistent point-in-time exports](#consistent-point-in-time-exports).
 - **Resilient runs:** transient failures (network drops, failovers, throttling) are retried; export files only appear under their real names once complete; every export writes a manifest with each file's SHA-256, can be checked later with `verify`, and an interrupted export continues with `--resume` — see [Resilience](#resilience).
+- **Very large tables:** `--split-tables` cuts chosen tables into key ranges that export, load and copy in parallel, and retry and resume part by part; `import --disable-indexes` loads first and rebuilds nonclustered indexes afterwards — see [Splitting large tables](#splitting-large-tables).
 - **Compression:** `--compress gzip` writes `.json.gz` / `.bcp.gz` files, several times smaller (3.2 times on the CI test data); import reads them directly — see [Compressed exports](#compressed-exports).
 - **Streaming JSON import:** rows go from the file straight into the bulk load, so memory use stays flat however large the table.
 - Windows Authentication by default; SQL logins supported.
@@ -112,14 +113,15 @@ bcpjson export --source-database AdventureWorks --file-format json --export-path
 | `--log-file` | Also append all console messages to this file. |
 | `--max-tasks` | Maximum tables exported in parallel (default unlimited). |
 | `--snapshot` | Export from a database snapshot so every table reflects the same moment (see [Consistent point-in-time exports](#consistent-point-in-time-exports)). |
+| `--split-tables` | Split large tables into key ranges exported in parallel: `schema.table[:parts]`, `*` wildcard, 2 to 200 parts (default 8). See [Splitting large tables](#splitting-large-tables). |
 | `--compress` | `none` (default) or `gzip`. See [Compressed exports](#compressed-exports). |
 | `--compression-level` | gzip level: `fastest` (default), `optimal` or `smallest`. |
 | `--retries`, `--resume` | See [Resilience](#resilience). |
 
 **Output files**
 
-- JSON: `<schema>.<table>.json` (`.json.gz` with `--compress gzip`)
-- BCP: `<schema>.<table>.bcp` (pipe-delimited character data; `.bcp.gz` with `--compress gzip`), `<schema>.<table>-c.fmt` (format file, needed for import; older exports' `-c.xml` files are still accepted), plus `_output.log` / `_error.log` from bcp.
+- JSON: `<schema>.<table>.json` (`.json.gz` with `--compress gzip`); a split table gets `<schema>.<table>.part0001.json`, `.part0002.json`, and so on instead (see [Splitting large tables](#splitting-large-tables))
+- BCP: `<schema>.<table>.bcp` (pipe-delimited character data; `.bcp.gz` with `--compress gzip`), `<schema>.<table>-c.fmt` (format file, needed for import; older exports' `-c.xml` files are still accepted), plus `_output.log` / `_error.log` from bcp. The parts of a split table are `<schema>.<table>.part0001.bcp` and so on, with one shared format file and one pair of logs per part.
 - `bcpjson-manifest.json` (see [The export manifest](#the-export-manifest)).
 
 ### Import
@@ -151,7 +153,8 @@ bcpjson import --file-format json --source-path D:\dumps\aw --source-file "*.jso
 | `--truncate-target` | Truncate the table before loading. |
 | `--max-tasks` | Maximum files imported in parallel (default unlimited). |
 | `--no-table-lock` | Load without a table lock (default: locked). See [Table locking](#table-locking). |
-| `--batch-size` | Rows per committed batch (default `50000`). `0` loads each file in one transaction. |
+| `--disable-indexes` | Disable the target's nonclustered indexes during the load and rebuild them afterwards. See [Splitting large tables](#splitting-large-tables). |
+| `--batch-size` | Rows per committed batch (default `50000`). `0` loads each file in one transaction (each part file of a split table separately). |
 | `--trust-server-certificate`, `--log-file`, `--retries` | As for export. |
 
 Identity values and NULLs are preserved. Computed and `rowversion` columns are skipped and recalculated by the server.
@@ -179,6 +182,7 @@ bcpjson copy --source-server PROD01 --source-database Sales `
 | `--nolock` | Read the source with `WITH (NOLOCK)`. |
 | `--no-table-lock` | Load without a table lock (default: locked). See [Table locking](#table-locking). |
 | `--snapshot` | Copy from a database snapshot of the source. See [Consistent point-in-time exports](#consistent-point-in-time-exports). |
+| `--split-tables` | Copy large tables as parallel key-range streams: `schema.table[:parts]`, `*` wildcard, 2 to 200 parts (default 8). See [Splitting large tables](#splitting-large-tables). |
 | `--no-indexes` | Don't recreate primary keys, unique constraints and indexes on the tables copy creates (default: recreated). See [Keys and indexes](#keys-and-indexes). |
 | `--foreign-keys` | Also recreate foreign keys (default: off). See [Foreign keys](#foreign-keys). |
 | `--no-check-constraints` | Don't recreate check constraints (default: recreated). See [Check constraints](#check-constraints). |
@@ -193,7 +197,7 @@ Missing target tables are created from the source definition: columns, nullabili
 
 When `copy` creates a target table (it did not exist, or `--drop-target` dropped it), it recreates every primary key, unique constraint and index of the source table: clustered and nonclustered, unique and filtered indexes, included columns, descending keys, data compression, columnstore, XML and spatial indexes. They are built **after the data is loaded**, because bulk loading into a table without indexes (with the default table lock) is the fastest way to load, and building each index once at the end is much cheaper than maintaining it row by row. The clustered index is built first, then the others in dependency order.
 
-Indexes are created on the target database's default filegroup: filegroup and partition-scheme placement is not copied, because the target may not have the same filegroups. Index and constraint names are kept, except for constraints that were declared without a name (such as `PRIMARY KEY` on a column): SQL Server named those itself (`PK__Orders__3214EC07…`), and the copy gets its own system-generated name, just as running the original `CREATE TABLE` would. An index that cannot be created is reported as an error (exit code 1) and the remaining indexes are still created.
+Indexes are created on the target database's default filegroup: filegroup placement is not copied, because the target may not have the same filegroups. A partitioned source table is the exception: when the target database already has a partition scheme with the same name, the table (and its indexes) is created on it; otherwise it is created unpartitioned. Index and constraint names are kept, except for constraints that were declared without a name (such as `PRIMARY KEY` on a column): SQL Server named those itself (`PK__Orders__3214EC07…`), and the copy gets its own system-generated name, just as running the original `CREATE TABLE` would. An index that cannot be created is reported as an error (exit code 1) and the remaining indexes are still created.
 
 A target table that **already exists** keeps its own indexes; `copy` does not add, change or remove them.
 
@@ -296,7 +300,7 @@ bcpjson copy --source-server PROD01 --source-database Sales `
 ### When to use `--no-table-lock`
 
 - **The target table is live.** Readers block until each batch commits (unless they use snapshot isolation, RCSI or `NOLOCK`), and writers block too. Use row locking when an application must keep working with the table during the load.
-- **Several files load into the same table with a clustered index** (as in the third example). With table locks those loads run one at a time; without them they can run in parallel. Heaps are the exception: BU locks are compatible with each other, so parallel table-locked loads into a heap work well and you can keep the default.
+- **Several files load into the same table with a clustered index** (as in the third example). With table locks those loads run one at a time; without them they can run in parallel. Heaps are the exception: BU locks are compatible with each other, so parallel table-locked loads into a heap work well and you can keep the default. (For the parts of a split table, bcpJson makes this choice itself: see [Splitting large tables](#splitting-large-tables).)
 - **Lock-sensitive environments**, for example a busy server where an exclusive table lock would trip blocking alerts.
 
 Without the table lock the load is fully logged, uses row/page locks (which SQL Server may still escalate to a table lock on very large loads), and is noticeably slower on big tables.
@@ -440,6 +444,8 @@ bcpjson export --source-database Sales --file-format json --export-path D:\dumps
 
 Tables that the manifest records, and whose files still have the recorded size, are skipped; everything else is exported. The run must use the same `--file-format`, `--compress`, `--source-database` and `--source-query` as the manifest, otherwise it stops with an error. With `--snapshot`, each run takes its own snapshot, so tables from the earlier run reflect an earlier point in time (a warning says so). Use a fresh export when one point in time matters more than saving the work already done.
 
+A split table resumes part by part: parts the manifest records, with their files intact, are kept and only the missing or damaged ones are exported (see [Splitting large tables](#splitting-large-tables)).
+
 ## Compressed exports
 
 **Applies to:** `export` (JSON and BCP); `import` reads the results. **Default:** off. **Options:** `--compress gzip`, `--compression-level fastest|optimal|smallest`.
@@ -460,6 +466,110 @@ bcpjson export --source-database Sales --file-format bcp --export-path D:\archiv
 **Which level?** `fastest` (the default) gets most of the reduction and is fast enough not to slow down an export. How much a file shrinks depends on the data: repetitive JSON (the same property names on every row, many similar values) compresses best. The CI test data, which is deliberately varied, shrinks 3.2 times. `optimal` saves a little more space for noticeably more CPU, and `smallest` more again; use them for archives written once and kept long.
 
 **Why compression is off by default.** Plain files can be diffed line by line, opened in any editor and read by any tool. That was the point of bcpJson's format, and existing scripts expect `.json` and `.bcp` names. Turn it on when disk space or copy time matters more.
+
+## Splitting large tables
+
+**Applies to:** `export` (JSON and BCP) and `copy` (`--split-tables`); `import` loads the parts and adds `--disable-indexes`. **Default:** off, every table is one file. **Options:** `--split-tables pattern[:parts]`, `--disable-indexes`.
+
+One table is normally one unit of work: a single task reads it, writes its file and loads it, so a table of hundreds of millions of rows sets the length of the whole run, and a transient error redoes it from the start. `--split-tables` cuts the tables you name into **key ranges**, each handled as its own task: parts are exported, loaded and copied in parallel, and retried and resumed one by one. Tables you do not name are exported exactly as before.
+
+```powershell
+# A history table with an identity key, cut into 16 parts and exported 8 at a time
+bcpjson export --source-server PROD01 --source-database Sales --file-format json --export-path D:\dumps\sales `
+               --include-tables dbo.OrderHistory --split-tables dbo.OrderHistory:16 --snapshot --max-tasks 8
+
+# Restore it: load the parts in parallel, with the nonclustered indexes rebuilt once at the end
+bcpjson import --file-format json --source-path D:\dumps\sales --source-file "*.json" `
+               --target-database Sales_Restore --truncate-target --disable-indexes --max-tasks 8
+
+# The same idea server to server: 16 parallel streams, no files in between
+bcpjson copy --source-server PROD01 --source-database Sales --target-server TEST01 --target-database Sales_Test `
+             --include-tables dbo.OrderHistory --split-tables dbo.OrderHistory:16 --drop-target --snapshot --max-tasks 16
+```
+
+### Choosing tables and parts
+
+`--split-tables` takes comma-separated entries of the form `schema.table[:parts]`. `*` is a wildcard (`dbo.*History:16`), the number of parts is 2 to 200 and defaults to 8, and the first entry that matches a table wins. An entry that ends in `:` or asks for a part count outside 2 to 200 is rejected. On `export` it cannot be combined with `--source-query`. `--max-tasks` limits how many parts (and unsplit tables) run at once; the largest are started first.
+
+Splitting pays off for tables of tens of millions of rows or more, on a server that can feed several readers at once. For small tables it only adds files.
+
+**Use `--snapshot` with `--split-tables`.** Without it the parts of one table are read at different moments, so rows that change during the run can be missed or read twice, and bcpJson warns about it. With `--snapshot` every part reads the same moment.
+
+### How the ranges are chosen
+
+- **Partitioned tables** are cut at their partition boundaries: neighbouring partitions are grouped so each part holds about the same number of rows (exact row counts, read from the server). A single partition is never cut further, so a table with fewer partitions than parts you asked for gets fewer parts.
+- **Other tables** are cut on the first column of the clustered rowstore index, using the statistics histogram of that index. For number and date/time keys the boundaries are interpolated inside the histogram steps, so a key that grows evenly (an identity column, which the histogram describes with only a handful of steps) still gets the number of parts you asked for. Text, `uniqueidentifier` and binary keys use the histogram's own step values, so they may get fewer parts than requested.
+
+The ranges together cover the table exactly once, including NULL keys. Out-of-date statistics make the parts uneven in size, never wrong; run `UPDATE STATISTICS` on a table whose parts come out very uneven.
+
+### Tables that are not split
+
+A table that cannot be split is exported whole, with a warning of the form `<table>: not split: <reason>.`, and the run carries on. Reasons: a heap or clustered columnstore table that is not partitioned; a split column of a type that cannot be cut (or a `varchar` key whose code page differs from the database's); no statistics histogram (run `UPDATE STATISTICS`); too few distinct key values; a NULL partition boundary; a split column whose name contains `"`, `\` or control characters; a table with a sparse column set; a graph table; or any error while planning. A key where one value holds most of the rows cannot be cut inside that value, so such a table gets uneven parts. For `copy`, tables with geography, geometry or hierarchyid columns (copied through bcp) are never split.
+
+### Part files and the manifest
+
+A split table writes `<schema>.<table>.part0001.json` (`.json.gz` with `--compress gzip`), `.part0002.json`, and so on, each holding one key range in key order, so the parts in order are the rows of the single file. BCP parts are `<schema>.<table>.part0001.bcp` and so on; they share one `<schema>.<table>-c.fmt` and each part has its own `_error.log` and `_output.log`.
+
+In `bcpjson-manifest.json` the table stays one entry that lists all its part files, plus a `split` object recording how it was cut:
+
+```json
+{
+  "name": "dbo.OrderHistory",
+  "rows": 120000000,
+  "files": [ { "name": "dbo.OrderHistory.part0001.json", "bytes": 912345678, "sha256": "4be1..." }, "... one per part ..." ],
+  "split": {
+    "kind": "histogram",
+    "column": "OrderHistoryID",
+    "type": "bigint",
+    "descending": false,
+    "nullable": false,
+    "partCount": 16,
+    "boundaries": [ "7500000", "15000000", "... 15 values in all ..." ],
+    "parts": [
+      { "part": 1, "rows": 7500000, "files": [ "dbo.OrderHistory.part0001.json" ],
+        "lower": null, "lowerInclusive": false, "upper": "7500000", "upperInclusive": false, "includeNulls": false },
+      "... one per part ..."
+    ]
+  }
+}
+```
+
+`kind` is `histogram` or `partition` (which also records `partitionFunction` and `rangeRight`). Boundaries are stored as the text SQL Server converts the key to. `verify` checks every part file like any other file and reports `<table>: <k> of <n> parts exported.` when a split table is missing parts.
+
+### Resuming and retrying
+
+Each part is exported, retried and recorded on its own. After an interruption, `export --resume` keeps the recorded split (it says `<table>: --resume keeps its recorded split (<n> parts).` when your `--split-tables` differs or is missing, because new boundaries would not match the parts already written), skips the parts whose files are intact and exports only the rest (`<table>: <k> part(s) to go.`). A transient error therefore redoes one part, not the table.
+
+### Importing parts and how they load
+
+`import` groups the files by table (`--source-file "*.json"` picks up every part), truncates the table once (with `--truncate-target`) before any part loads, and then loads the parts into it. Whether they can load **in parallel** depends on what the target looks like, because SQL Server only lets several table-locked bulk loads run side by side in some cases. bcpJson looks at the target and reports its choice per table, as `<table>: <n> parts, loading in parallel.` or `<table>: <n> parts, loading one after another (<reason>).`
+
+| Target table | With the table lock (default) | With `--no-table-lock` |
+|---|---|---|
+| Heap, or a table with no enabled index | Parallel (bulk-update locks do not conflict) | Parallel |
+| Clustered rowstore index | One after another (`clustered index`; the table lock is exclusive) | Parallel |
+| Heap with enabled nonclustered indexes | One after another (`enabled nonclustered indexes`) | Parallel |
+| Clustered columnstore index | One after another (`columnstore`; measured in CI: a columnstore load takes S and X locks, not bulk-update) | Parallel |
+| Table with geography/geometry/hierarchyid columns (JSON) | One after another (`CLR columns`; loaded through a staging table that always takes a table lock) | One after another |
+
+Parts are never loaded in the wrong order: when they load one after another they go in key order, so a clustered table receives sorted rows. For a partitioned target with `--no-table-lock`, bcpJson suggests `ALTER TABLE ... SET (LOCK_ESCALATION = AUTO)`, which lets parts in different partitions load without blocking each other.
+
+### Load first, index afterwards: `--disable-indexes`
+
+**Applies to:** `import` (JSON and BCP), all tables of the run. **Default:** off.
+
+The tables that matter most for a restore are those with many nonclustered indexes, and every index slows every row of the load. `--disable-indexes` is the "load first, index afterwards" restore: before a table's first part it disables the table's nonclustered indexes, so its parts can load in parallel; after the last part it rebuilds them, once each.
+
+- **Not disabled:** the primary key, the clustered index, and any index a foreign key references (disabling those would block the load or the keys). Unique indexes are disabled and checked again on rebuild, so duplicate rows fail the rebuild, not the load.
+- **Always rebuilt:** the rebuild runs even when the load failed part way, so the table is not left with disabled indexes. An index that cannot be rebuilt is reported as an error by name together with the `ALTER INDEX ... REBUILD` command to run by hand; the others are still rebuilt.
+- **Memory-optimized tables** are skipped (`<table>: memory-optimized; --disable-indexes ignored.`).
+- Two groups of files that resolve to the same target table (for example `T.json` and `dbo.T.json`) are refused.
+
+On the CI benchmark (1,000,000 rows into an indexed table on a GitHub runner, so indicative only), loading with `--disable-indexes` took 4.8 s instead of 7.6 s with the indexes in place; loading the same data into a bare heap took 2.9 s. Splitting a 1,000,000-row export into 8 parts took 2.1 s instead of 2.5 s for JSON and 1.0 s instead of 1.3 s for BCP; the gains grow with the table, the server and the number of readers it can feed. A benchmark workflow (`.github/workflows/benchmark.yml`, run manually) reproduces these numbers on any row count.
+
+### Copy
+
+With `--split-tables`, `copy` streams each key range from the source straight into the target, several at once and without files in between. When `copy` creates the table, it first loads it as a heap (so the parts load in parallel) and builds the indexes after every part has arrived, as for any copy. Into a table that already exists, the load-mode rules above apply. Keys, indexes and check constraints are created only when every part succeeded; otherwise an error says `<table>: copy incomplete (<k> of <n> parts failed)` and the table needs to be copied again.
 
 ## JSON format
 
@@ -484,7 +594,8 @@ Each file is a JSON array with one object per row, one row per line:
 - BCP exports (`bcp out`) are not ordered, so BCP files are not reliably diff-able; JSON files are.
 - `sql_variant` values are re-imported as `nvarchar`.
 - `copy --source-query` is not supported.
-- `copy` recreates keys, indexes and check constraints (and foreign keys and triggers on request), but not other objects such as views, procedures, functions or DDL triggers; indexes are placed on the target's default filegroup.
+- `copy` recreates keys, indexes and check constraints (and foreign keys and triggers on request), but not other objects such as views, procedures, functions or DDL triggers; indexes are placed on the target's default filegroup. A partitioned source table is created on the target's partition scheme of the same name if there is one, and unpartitioned otherwise.
+- **Split tables:** a key with one dominant value cannot be cut inside that value, and text keys may yield fewer parts than asked; BCP exports are unordered, so BCP imports give SQL Server no `ORDER` hint; `--batch-size 0` is one transaction per part, not per table; and a real table whose name ends in `.part` and four digits (for example `dbo.x.part0001`) is read as a part on import. bcpJson does not test loading a table with a sparse column set through JSON import or copy; such tables are never split.
 - `import` bulk loads without checking constraints (the bcp and SqlBulkCopy default, which is what makes it fast). Foreign key and check constraints on the target tables are not validated during the load and SQL Server marks them as not trusted; run `ALTER TABLE ... WITH CHECK CHECK CONSTRAINT ALL` afterwards if you need them trusted.
 - BCP import into a table whose schema or table name contains `.` or `"` **and** that has a filtered, XML or spatial index fails (bcp cannot set `QUOTED_IDENTIFIER ON` for such names). Use JSON import for that table.
 - `-k` on export is reserved; JSON always writes NULLs.
@@ -519,6 +630,10 @@ The solution `BcpJson.sln` holds the app in `src/BcpJson/` and the xUnit tests i
 | `Program.Resilience.cs` | Retries for transient failures, `.partial` files |
 | `Program.Verify.cs` | The `verify` verb |
 | `ExportManifest.cs` | `bcpjson-manifest.json`: read, write, file hashes, resume checks |
+| `Program.Split.cs` | Planning and running split exports and split copies |
+| `Program.Indexes.cs` | `--disable-indexes`: disabling and rebuilding indexes |
+| `SplitRequest.cs`, `KeyRange.cs`, `KeyInterpolation.cs`, `RangePlanner.cs` | `--split-tables` parsing, key ranges and boundary selection |
+| `PartFiles.cs`, `LoadPlanning.cs`, `WorkQueue.cs` | Part file names, parallel or sequential loading, per-table work ordering |
 | `Program.Sql.cs` | Table selection, name quoting, shared SQL helpers |
 | `ExportOptions.cs`, `ImportOptions.cs`, `CopyOptions.cs`, `VerifyOptions.cs` | Command-line options for each verb |
 | `SqlConnectionFactory.cs` | Connection string building and connection tests |

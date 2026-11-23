@@ -1,6 +1,6 @@
 ﻿# Key-range splitting for large tables: design
 
-Status: draft, 2026-11-23. Replaces the "TODO: extremely large tables" section of `docs/ROADMAP.md` once approved.
+Status: implemented in PR #45 (see "As built" at the end). Replaces the "TODO: extremely large tables" section of `docs/ROADMAP.md` once approved.
 
 ## Why
 
@@ -274,6 +274,19 @@ GitHub runners have few cores, so the numbers show direction, not absolute speed
 - The exact JSON shape of `split` beyond the fields listed, and console message wording.
 - Literal rendering per type for BCP `queryout`, within the anti-goals (exact ranges).
 - Rebuild options (`SORT_IN_TEMPDB`, `MAXDOP`): server defaults unless the benchmark suggests otherwise.
+
+## As built
+
+Where the implementation differs from the text above (the code and README win):
+
+- **Interpolated boundaries.** For number and date/time keys, boundaries are interpolated inside histogram steps (`KeyInterpolation.cs`), because an identity-like key has only 2-4 histogram steps. Strings, `uniqueidentifier` and binary keys use histogram step keys and may get fewer parts than requested.
+- **More tables are not split:** tables with a sparse column set and graph tables (exported whole with `not split: ...`), besides the cases listed in section 2.
+- **Manifest.** Boundaries are stored as `CONVERT` text; per-part partition numbers are not recorded.
+- **Ruling: no BCP `-h ORDER` hint.** BCP exports are unordered, so BCP imports never get an order hint. This replaces the sentence "BCP import follows the same steps ..." in section 9.
+- **Ruling: the "same boundaries" log line is dropped** (section 11): nothing in the code compares the target's partition boundaries with the manifest.
+- **Copy creates partitioned targets.** A partitioned source table is created on the target's partition scheme of the same name when the target database has one (otherwise unpartitioned, as before). This corrects the row of the section 11 table that says copy creates them unpartitioned.
+- **CI lock probe result.** `tests/integration/lock_probe.ps1` showed that concurrent TABLOCK loads into a heap take BU locks (parallel), into a clustered rowstore index Sch-M/X, and into a clustered columnstore index S+X, not BU. Columnstore targets therefore load their parts one after another (`LoadPlanning.ClusteredColumnstoreLoadsInParallel` is false).
+- **Benchmark (1,000,000 rows, GitHub runner, indicative only; run 45286615286).** JSON export 2.5 s unsplit, 2.1 s in 8 parts; BCP 1.3 s and 1.0 s. Import into an indexed table 7.6 s; with `--disable-indexes` 4.8 s; into a bare heap 2.9 s; heap and then building the indexes (option 2) 3.1 + 1.9 = 5.0 s. Option 2 stays undecided until a 5,000,000-row run.
 
 ## Later
 
