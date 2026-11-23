@@ -139,11 +139,15 @@ compare_decimals() {
     echo "plain.Decimals identical to the source: $actual"
 }
 
-# Empty database with the test schemas but no tables (copy creates them).
+# Empty database with the test schemas but no tables (copy creates them). copy scripts the indexes of partitioned
+# tables with their partition scheme, so the scheme of schema.sql must exist too.
 create_empty_db() {
     local db="$1"
     sql -Q "IF DB_ID(N'$db') IS NOT NULL BEGIN ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db]; END; CREATE DATABASE [$db];"
-    sql -d "$db" -Q "EXEC (N'CREATE SCHEMA rt'); EXEC (N'CREATE SCHEMA plain'); EXEC (N'CREATE SCHEMA split');"
+    sql -d "$db" -Q "EXEC (N'CREATE SCHEMA rt'); EXEC (N'CREATE SCHEMA plain'); EXEC (N'CREATE SCHEMA split');
+        CREATE PARTITION FUNCTION pf_SplitMonth (DATETIME2(7)) AS RANGE RIGHT
+            FOR VALUES ('2026-01-01', '2026-02-01', '2026-03-01', '2026-04-01', '2026-05-01', '2026-06-01');
+        CREATE PARTITION SCHEME ps_SplitMonth AS PARTITION pf_SplitMonth ALL TO ([PRIMARY]);"
 }
 
 # Object definitions compared between source and copy; each has a <kind>.sql returning one line per object.
