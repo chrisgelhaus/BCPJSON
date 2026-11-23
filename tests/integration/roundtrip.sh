@@ -545,6 +545,28 @@ case "${1:-}" in
         diff <(jq -r '.tables[] | select(.name == "split.Big" or .name == "split.Text" or .name == "split.Descending" or .name == "split.Parted") | "\(.name) \(.rows)"' "$src/$MANIFEST") \
              <(jq -r '.tables[] | "\(.name) \(.rows)"' "$sb/$MANIFEST") || { echo "::error::Split BCP export row counts differ"; exit 1; }
 
+        # BCP parts name every column like the format file, including the HIDDEN period columns of a temporal table
+        # (SELECT * would leave them out and the rows would not match the format file).
+        sql -Q "DROP DATABASE IF EXISTS BcpJsonTemporal; CREATE DATABASE BcpJsonTemporal;"
+        sql -d BcpJsonTemporal -Q "CREATE TABLE dbo.Versioned (Id INT NOT NULL CONSTRAINT PK_Versioned PRIMARY KEY CLUSTERED, Val INT NOT NULL,
+            ValidFrom DATETIME2(7) GENERATED ALWAYS AS ROW START HIDDEN NOT NULL, ValidTo DATETIME2(7) GENERATED ALWAYS AS ROW END HIDDEN NOT NULL,
+            PERIOD FOR SYSTEM_TIME (ValidFrom, ValidTo)) WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = dbo.VersionedHistory));"
+        sql -d BcpJsonTemporal -Q "SET NOCOUNT ON; INSERT dbo.Versioned (Id, Val) SELECT TOP (20000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), 1 FROM sys.all_objects a CROSS JOIN sys.all_objects b; UPDATE STATISTICS dbo.Versioned WITH FULLSCAN;"
+        st="$WORK/split-temporal"
+        rm -rf "$st"
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonTemporal --file-format bcp --export-path "$st" \
+            --include-tables dbo.Versioned --split-tables "dbo.Versioned:4" | tee "$WORK/split-temporal.log"
+        [ "$(part_count "$st" dbo.Versioned bcp)" = "4" ] || { echo "::error::dbo.Versioned has no 4 BCP parts"; exit 1; }
+        bcpjson verify --path "$st"
+        [ "$(jq '.tables[] | select(.name == "dbo.Versioned") | .rows' "$st/$MANIFEST")" = "20000" ] || { echo "::error::dbo.Versioned rows"; exit 1; }
+        fields="$(sed -n 2p "$st/dbo.Versioned-c.fmt" | tr -d '[:space:]')"
+        [ "$fields" = "4" ] || { echo "::error::Format file of dbo.Versioned lists $fields columns, expected 4 (hidden ones included)"; exit 1; }
+        if cat "$st"/dbo.Versioned.part*.bcp | awk -F'|' -v n="$fields" 'NF != n { bad++ } END { exit bad > 0 ? 0 : 1 }'; then
+            echo "::error::BCP part rows do not have the format file's $fields fields"; exit 1
+        fi
+        echo "Temporal table: 4 BCP parts, 20,000 rows of $fields fields each."
+        sql -Q "ALTER DATABASE BcpJsonTemporal SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE BcpJsonTemporal;"
+
         # 4. --resume after losing one part, without --split-tables: the recorded split is kept and only that part redone.
         res="$WORK/split-resume"
         rm -rf "$res"

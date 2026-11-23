@@ -29,7 +29,13 @@ namespace bcpJson
         /// </summary>
         public bool HasCommandLineSafeName
         {
-            get { return Name != null && !Name.Any(c => c == '"' || c == '\\' || c < 32); }
+            get { return IsCommandLineSafe(Name); }
+        }
+
+        /// <summary>False for null or a name holding a double quote, a backslash or a control character.</summary>
+        public static bool IsCommandLineSafe(string name)
+        {
+            return name != null && !name.Any(c => c == '"' || c == '\\' || c < 32);
         }
 
         /// <summary>The column type as T-SQL, for example decimal(18,4), nvarchar(30), varchar(max).</summary>

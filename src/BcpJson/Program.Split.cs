@@ -51,7 +51,9 @@ namespace bcpJson
 
         /// <summary>
         /// Ranges from the clustered index's statistics histogram (steps in ascending key order, also for a
-        /// descending key). Null plus a reason when the histogram is empty or yields a single range.
+        /// descending key). Number and date/time keys get boundaries interpolated inside the steps
+        /// (<see cref="KeyInterpolation"/>); other keys cut at step keys. Null plus a reason when the histogram is empty
+        /// or yields a single range.
         /// </summary>
         internal static TableSplit FromHistogram(SplitColumn column, IReadOnlyList<RangePlanner.HistogramStep> steps, int parts, out string reason)
         {
@@ -62,27 +64,19 @@ namespace bcpJson
                 return null;
             }
 
-            // A NULL step (nullable key) holds the NULLs, which go with the first range; it is never a boundary.
-            List<int> chosen = RangePlanner.ChooseHistogramSteps(steps, parts).Where(i => steps[i].Key != null).ToList();
-            if (chosen.Count == 0)
+            List<KeyInterpolation.Cut> cuts = KeyInterpolation.Boundaries(column, steps, parts) ?? StepKeyCuts(steps, parts);
+            if (cuts.Count == 0)
             {
                 reason = TooFewValues;
                 return null;
             }
 
-            var below = new double[steps.Count];
-            double total = 0;
-            for (int j = 0; j < steps.Count; j++)
-            {
-                below[j] = total + steps[j].RangeRows;
-                total += steps[j].RangeRows + steps[j].EqualRows;
-            }
-
+            double total = steps.Sum(s => s.RangeRows + s.EqualRows);
             var estimates = new List<long>();
-            for (int i = 0; i <= chosen.Count; i++)
+            for (int i = 0; i <= cuts.Count; i++)
             {
-                double from = i == 0 ? 0 : below[chosen[i - 1]];
-                double to = i == chosen.Count ? total : below[chosen[i]];
+                double from = i == 0 ? 0 : cuts[i - 1].Below;
+                double to = i == cuts.Count ? total : cuts[i].Below;
                 estimates.Add((long)Math.Round(Math.Max(0, to - from)));
             }
             if (column.Descending)
@@ -90,7 +84,7 @@ namespace bcpJson
                 estimates.Reverse();
             }
 
-            List<string> boundaries = chosen.Select(i => steps[i].Key).ToList();
+            List<string> boundaries = cuts.Select(c => c.Key).ToList();
             return new TableSplit
             {
                 Column = column,
@@ -99,6 +93,23 @@ namespace bcpJson
                 Ranges = RangePlanner.HistogramRanges(boundaries, column.Nullable, column.Descending),
                 EstimatedRows = estimates
             };
+        }
+
+        /// <summary>Boundaries at histogram step keys, with the rows below each.</summary>
+        private static List<KeyInterpolation.Cut> StepKeyCuts(IReadOnlyList<RangePlanner.HistogramStep> steps, int parts)
+        {
+            var below = new double[steps.Count];
+            double running = 0;
+            for (int j = 0; j < steps.Count; j++)
+            {
+                below[j] = running + steps[j].RangeRows;
+                running += steps[j].RangeRows + steps[j].EqualRows;
+            }
+            // A NULL step (nullable key) holds the NULLs, which go with the first range; it is never a boundary.
+            return RangePlanner.ChooseHistogramSteps(steps, parts)
+                .Where(i => steps[i].Key != null)
+                .Select(i => new KeyInterpolation.Cut(steps[i].Key, below[i]))
+                .ToList();
         }
 
         /// <summary>

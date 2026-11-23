@@ -71,6 +71,20 @@ DECLARE @guid UNIQUEIDENTIFIER = '6F9619FF-8B86-D011-B42D-00C04FC964FF';
 SET @t = CONVERT(NVARCHAR(4000), @guid);
 IF CONVERT(UNIQUEIDENTIFIER, @t) <> @guid OR CONVERT(NVARCHAR(4000), CONVERT(UNIQUEIDENTIFIER, @t)) <> @t SET @failures += N' uniqueidentifier(' + @t + N')';
 
+/* Interpolated boundaries (KeyInterpolation) are written in these forms; each must convert to the intended value. */
+IF CONVERT(DATETIME, N'2026-01-01T00:00:01.010', 126) <> DATETIMEFROMPARTS(2026, 1, 1, 0, 0, 1, 10) SET @failures += N' datetime(interpolated)';
+IF CONVERT(SMALLDATETIME, N'2026-01-01T05:01:00', 126) <> SMALLDATETIMEFROMPARTS(2026, 1, 1, 5, 1) SET @failures += N' smalldatetime(interpolated)';
+IF CONVERT(DATE, N'2026-07-02', 126) <> DATEFROMPARTS(2026, 7, 2) SET @failures += N' date(interpolated)';
+IF CONVERT(DATETIME2(7), N'2026-01-01T12:00:00.1234567', 126) <> DATETIME2FROMPARTS(2026, 1, 1, 12, 0, 0, 1234567, 7) SET @failures += N' datetime2(7)(interpolated)';
+IF CONVERT(DATETIME2(3), N'2026-01-01T12:00:00.123', 126) <> DATETIME2FROMPARTS(2026, 1, 1, 12, 0, 0, 123, 3) SET @failures += N' datetime2(3)(interpolated)';
+IF CONVERT(DATETIME2(0), N'2026-01-01T12:00:01', 126) <> DATETIME2FROMPARTS(2026, 1, 1, 12, 0, 1, 0, 0) SET @failures += N' datetime2(0)(interpolated)';
+IF CONVERT(DATETIMEOFFSET(7), N'2026-01-01T12:00:00.1234567+05:30', 126) <> DATETIMEOFFSETFROMPARTS(2026, 1, 1, 12, 0, 0, 1234567, 5, 30, 7)
+   OR DATEPART(TZOFFSET, CONVERT(DATETIMEOFFSET(7), N'2026-01-01T12:00:00.1234567+05:30', 126)) <> 330 SET @failures += N' datetimeoffset(interpolated)';
+IF CONVERT(DATETIMEOFFSET(0), N'2026-01-01T12:00:00-08:00', 126) <> DATETIMEOFFSETFROMPARTS(2026, 1, 1, 12, 0, 0, 0, -8, 0, 0) SET @failures += N' datetimeoffset(0)(interpolated)';
+IF CONVERT(MONEY, N'-1234.5678', 2) <> CAST(-1234.5678 AS MONEY) SET @failures += N' money(interpolated)';
+IF CONVERT(DECIMAL(18, 4), N'0.5000') <> 0.5 SET @failures += N' decimal(interpolated)';
+IF CONVERT(BIGINT, N'9223372036854775400') <> 9223372036854775400 SET @failures += N' bigint(interpolated)';
+
 IF @failures <> N''
 BEGIN
     DECLARE @message NVARCHAR(2048) = LEFT(N'CONVERT styles do not round-trip:' + @failures, 2048);

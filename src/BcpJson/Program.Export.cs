@@ -110,7 +110,8 @@ SELECT @Columns, @SortOrder;";
         /// split table (--split-tables, or the split --resume finds in the manifest). A table whose planning fails is
         /// reported and left out.
         /// </summary>
-        private static List<ExportItem> PlanExportItems(ExportOptions options, ExportManifest manifest, List<TableRef> tables)
+        private static List<ExportItem> PlanExportItems(ExportOptions options, ExportManifest manifest, List<TableRef> tables,
+            Func<SqlConnection, TableRef, string> splitProblem = null)
         {
             var items = new List<ExportItem>();
             if (tables.Count == 0)
@@ -127,7 +128,7 @@ SELECT @Columns, @SortOrder;";
                     long rows = rowCounts.TryGetValue(table.ObjectId, out long counted) ? counted : 0;
                     try
                     {
-                        TableSplit split = ChooseSplit(options, manifest, conn, table, out List<int> partsToExport);
+                        TableSplit split = ChooseSplit(options, manifest, conn, table, splitProblem, out List<int> partsToExport);
                         if (split == null)
                         {
                             items.Add(new ExportItem(table, null, null, rows));
@@ -155,9 +156,11 @@ SELECT @Columns, @SortOrder;";
         /// <summary>
         /// How a table is exported: null for one file, or its split. With --resume, a split recorded in the manifest is
         /// kept (partsToExport then lists the parts still missing) and a table recorded unsplit stays unsplit.
-        /// partsToExport is null when every part is to be exported.
+        /// partsToExport is null when every part is to be exported. <paramref name="splitProblem"/> (may be null) gives a
+        /// format-specific reason not to split a table.
         /// </summary>
-        private static TableSplit ChooseSplit(ExportOptions options, ExportManifest manifest, SqlConnection conn, TableRef table, out List<int> partsToExport)
+        private static TableSplit ChooseSplit(ExportOptions options, ExportManifest manifest, SqlConnection conn, TableRef table,
+            Func<SqlConnection, TableRef, string> splitProblem, out List<int> partsToExport)
         {
             partsToExport = null;
             string name = table.DisplayName;
@@ -189,7 +192,35 @@ SELECT @Columns, @SortOrder;";
             {
                 return null;
             }
-            TableSplit split = PlanSplit(conn, table, requested.Value, out string reason);
+            string problem = splitProblem?.Invoke(conn, table);
+            if (problem != null)
+            {
+                return SplitOrWhole(name, () => (null, problem));
+            }
+            return SplitOrWhole(name, () =>
+            {
+                TableSplit planned = PlanSplit(conn, table, requested.Value, out string reason);
+                return (planned, reason);
+            });
+        }
+
+        /// <summary>
+        /// Runs a split plan for a table and reports the outcome. When the plan gives no split, or fails (a SQL error,
+        /// unexpected storage), the table is exported as one file with a "not split" warning.
+        /// </summary>
+        internal static TableSplit SplitOrWhole(string name, Func<(TableSplit Split, string Reason)> plan)
+        {
+            TableSplit split;
+            string reason;
+            try
+            {
+                (split, reason) = plan();
+            }
+            catch (Exception ex)
+            {
+                (split, reason) = (null, ex.Message.Trim().TrimEnd('.'));
+            }
+
             if (split == null)
             {
                 PostToConsole(string.Format("{0}: not split: {1}.", name, reason), InfoLevel.Warning);
@@ -523,13 +554,25 @@ ORDER BY ic.key_ordinal;";
             List<TableRef> tables = TablesToExport(options, manifest);
             string connectionArgs = BcpConnectionArgs(options.srcServer, options.srcDatabase, options.srcLogin, options.srcPassword, options.TrustServerCertificate);
             string outputPath = options.exportPath;
-            List<ExportItem> items = PlanExportItems(options, manifest, tables);
+            // Parts name every column on the bcp command line, so their names must be safe there.
+            List<ExportItem> items = PlanExportItems(options, manifest, tables, (conn, table) =>
+                ReadColumnNames(conn, table.ObjectId).All(SplitColumn.IsCommandLineSafe)
+                    ? null
+                    : "a column name contains characters bcp cannot take on its command line");
 
-            // A split table's parts share one format file, written once before its first part.
+            // A split table's parts share one format file and select list, prepared once before its first part.
             var formatFiles = new ConcurrentDictionary<int, ManifestFile>();
+            var selectLists = new ConcurrentDictionary<int, string>();
             Dictionary<int, TableWork> works = SplitTableWork(items, table => () =>
+            {
+                using (var conn = SqlConnectionFactory.Create(options.SourceConnectionString()))
+                {
+                    conn.Open();
+                    selectLists[table.ObjectId] = string.Join(", ", ReadColumnNames(conn, table.ObjectId).Select(QuoteName));
+                }
                 formatFiles[table.ObjectId] = WithRetries(table.DisplayName, options.Retries,
-                    () => WriteBcpFormatFile(table, connectionArgs, outputPath), ex => ex is BcpFailedException));
+                    () => WriteBcpFormatFile(table, connectionArgs, outputPath), ex => ex is BcpFailedException);
+            });
 
             RunExportItems(items, options.MaxParallelTasks, item =>
             {
@@ -564,7 +607,7 @@ ORDER BY ic.key_ordinal;";
                     {
                         string dataFile = options.DataFileName(partName, ".bcp");
                         long rows = WithRetries(partName, options.Retries,
-                            () => ExportPartToBcp(options, item, partName, connectionArgs, outputPath), ex => ex is BcpFailedException);
+                            () => ExportPartToBcp(options, item, selectLists[table.ObjectId], partName, connectionArgs, outputPath), ex => ex is BcpFailedException);
                         var shell = new ManifestTable
                         {
                             Name = name,
@@ -610,14 +653,15 @@ ORDER BY ic.key_ordinal;";
 
         /// <summary>
         /// Writes one key range of a table with bcp queryout to &lt;part&gt;.bcp (via .partial; gzip as for tables).
-        /// The range's boundaries are typed literals in the query, because bcp takes no parameters.
+        /// <paramref name="selectList"/> names every column in column_id order, hidden ones included, as the format file
+        /// does. The range's boundaries are typed literals in the query, because bcp takes no parameters.
         /// </summary>
-        private static long ExportPartToBcp(ExportOptions options, ExportItem item, string partName, string connectionArgs, string outputPath)
+        private static long ExportPartToBcp(ExportOptions options, ExportItem item, string selectList, string partName, string connectionArgs, string outputPath)
         {
             string dataPath = Path.Combine(outputPath, partName + ".bcp");
             try
             {
-                string query = "SELECT * FROM " + item.Table.QuotedName + (options.NoLock ? " WITH (NOLOCK)" : string.Empty)
+                string query = "SELECT " + selectList + " FROM " + item.Table.QuotedName + (options.NoLock ? " WITH (NOLOCK)" : string.Empty)
                     + " WHERE " + item.Range.Predicate(item.Split.Column);
                 string outputLog = partName + "_output.log";
                 string args = string.Format("{0} queryout {1} {2} -c -t| -m 1 -b 10000 -K ReadOnly -e {3}",
@@ -636,6 +680,24 @@ ORDER BY ic.key_ordinal;";
                 DiscardPartial(dataPath + FileCompression.GzipExtension);
                 throw;
             }
+        }
+
+        /// <summary>Every column of a table in column_id order (hidden period columns included), as bcp format lists them.</summary>
+        private static List<string> ReadColumnNames(SqlConnection conn, int objectId)
+        {
+            var names = new List<string>();
+            using (var cmd = new SqlCommand("SET NOCOUNT ON; SELECT name FROM sys.columns WHERE object_id = @objectId ORDER BY column_id;", conn))
+            {
+                cmd.Parameters.Add("@objectId", SqlDbType.Int).Value = objectId;
+                using (var reader = cmd.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        names.Add(reader.GetString(0));
+                    }
+                }
+            }
+            return names;
         }
 
         /// <summary>Runs bcp format for a table into &lt;table&gt;-c.fmt.partial. Throws <see cref="BcpFailedException"/> when bcp fails.</summary>

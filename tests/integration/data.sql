@@ -118,8 +118,8 @@ VALUES (1, 1, 'AAA', 1, 1, NULL), (2, 2, 'BBB', 1, 2, 1), (3, NULL, NULL, NULL, 
 INSERT plain.Ref (Id, ChildId, LooseChildId, OffChildId) VALUES (1, 1, 2, 99), (2, NULL, NULL, NULL), (3, 4, 4, 3);
 GO
 
-/* Schema split (--split-tables). Integer keys are i * i: evenly spaced keys compress into a statistics histogram of
-   only a few steps, which would give fewer parts than asked. */
+/* Schema split (--split-tables). Integer keys are evenly spaced like identity columns: their statistics histograms
+   have only a few steps, so the boundaries must be interpolated inside the steps to get the parts asked for. */
 SET NOCOUNT ON;
 
 WITH n AS
@@ -128,7 +128,7 @@ WITH n AS
     FROM sys.all_objects a CROSS JOIN sys.all_objects b
 )
 INSERT split.Big (Id, Stamp, Code, Amount, Note)
-SELECT CAST(i AS BIGINT) * i,
+SELECT i,
        DATEADD(SECOND, i, CAST('2026-01-01T00:00:00.1234567' AS DATETIME2(7))),
        CONCAT('C', i),
        i * 1.2345,
@@ -154,7 +154,7 @@ WITH n AS
     FROM sys.all_objects a CROSS JOIN sys.all_objects b
 )
 INSERT split.NullKey (K, Id)
-SELECT CASE WHEN i % 10 = 0 THEN NULL ELSE i * i END, i
+SELECT CASE WHEN i % 10 = 0 THEN NULL ELSE i END, i
 FROM n;
 
 WITH n AS
@@ -163,7 +163,7 @@ WITH n AS
     FROM sys.all_objects a CROSS JOIN sys.all_objects b
 )
 INSERT split.Descending (Id, Val)
-SELECT CAST(i AS BIGINT) * i, i % 100
+SELECT i, i % 100
 FROM n;
 
 -- 30,000 rows every 7 minutes from 2026-01-01 (until late May): partitions before January and from June stay empty.
