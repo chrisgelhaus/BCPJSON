@@ -30,6 +30,8 @@ function Get-LockMode([string]$table) {
     $a = New-Sql SqlConnection @($cs); $b = New-Sql SqlConnection @($cs)
     $a.Open(); $b.Open()
     try {
+        $idCmd = $b.CreateCommand(); $idCmd.CommandText = "SELECT OBJECT_ID(N'$table')"
+        $objectId = [int]$idCmd.ExecuteScalar()   # before the load: nothing here may wait for locks
         $tx = $a.BeginTransaction()
         $cmd = $a.CreateCommand(); $cmd.Transaction = $tx; $cmd.CommandText = 'SELECT @@SPID'
         $spid = [int]$cmd.ExecuteScalar()
@@ -55,7 +57,8 @@ function Get-LockMode([string]$table) {
         $bc.WriteToServer($dt)
 
         $q = $b.CreateCommand()
-        $q.CommandText = "SELECT DISTINCT request_mode FROM sys.dm_tran_locks WHERE request_session_id = $spid AND resource_type = 'OBJECT' AND resource_database_id = DB_ID() AND resource_associated_entity_id = OBJECT_ID(N'$table')"
+        $q.CommandText = "SELECT DISTINCT request_mode FROM sys.dm_tran_locks WHERE request_session_id = $spid AND resource_type = 'OBJECT' AND resource_database_id = DB_ID() AND resource_associated_entity_id = $objectId"
+        $q.CommandTimeout = 30
         $modes = @(); $r = $q.ExecuteReader(); while ($r.Read()) { $modes += $r.GetString(0) }; $r.Close()
         $tx.Rollback()
         return ($modes | Sort-Object) -join '+'
