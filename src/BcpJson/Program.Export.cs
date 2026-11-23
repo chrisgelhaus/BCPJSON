@@ -80,6 +80,8 @@ SELECT @Columns, @SortOrder;";
                 return tables;
             }
 
+            WarnUnmatchedSplitRequests(options.SplitRequests, tables);
+
             if (options.Resume)
             {
                 List<TableRef> remaining = tables.Where(t => !manifest.IsIntact(t.DisplayName, options.exportPath, false)).ToList();
@@ -108,9 +110,10 @@ SELECT @Columns, @SortOrder;";
         /// <summary>
         /// The work items of a table export, sized by estimated rows: one per unsplit table and one per part of a
         /// split table (--split-tables, or the split --resume finds in the manifest). A table whose planning fails is
-        /// reported and left out.
+        /// reported and left out; when planning cannot start (no connection), the error is reported and nothing is exported.
+        /// <paramref name="extension"/> is the data file extension (.json or .bcp).
         /// </summary>
-        private static List<ExportItem> PlanExportItems(ExportOptions options, ExportManifest manifest, List<TableRef> tables,
+        private static List<ExportItem> PlanExportItems(ExportOptions options, ExportManifest manifest, List<TableRef> tables, string extension,
             Func<SqlConnection, TableRef, string> splitProblem = null)
         {
             var items = new List<ExportItem>();
@@ -119,38 +122,68 @@ SELECT @Columns, @SortOrder;";
                 return items;
             }
 
-            using (var conn = SqlConnectionFactory.Create(options.SourceConnectionString()))
+            try
             {
-                conn.Open();
-                Dictionary<int, long> rowCounts = TableRowCounts(conn);
-                foreach (TableRef table in tables)
+                using (var conn = SqlConnectionFactory.Create(options.SourceConnectionString()))
                 {
-                    long rows = rowCounts.TryGetValue(table.ObjectId, out long counted) ? counted : 0;
-                    try
+                    conn.Open();
+                    Dictionary<int, long> rowCounts = TableRowCounts(conn);
+                    string[] folderFiles = options.Resume ? null : Directory.GetFiles(options.exportPath).Select(Path.GetFileName).ToArray();
+                    foreach (TableRef table in tables)
                     {
-                        TableSplit split = ChooseSplit(options, manifest, conn, table, splitProblem, out List<int> partsToExport);
-                        if (split == null)
-                        {
-                            items.Add(new ExportItem(table, null, null, rows));
-                            continue;
-                        }
-                        for (int i = 0; i < split.Ranges.Count; i++)
-                        {
-                            KeyRange range = split.Ranges[i];
-                            if (partsToExport == null || partsToExport.Contains(range.Part))
-                            {
-                                long estimate = split.EstimatedRows[i] >= 0 ? split.EstimatedRows[i] : rows / split.Ranges.Count;
-                                items.Add(new ExportItem(table, range, split, estimate));
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        PostToConsole(string.Format("{0}: {1}", table.DisplayName, ex.Message), InfoLevel.Error);
+                        PlanExportTable(options, manifest, conn, table, rowCounts, extension, folderFiles, splitProblem, items);
                     }
                 }
             }
+            catch (Exception ex)
+            {
+                PostToConsole(ex.Message, InfoLevel.Error);
+                return new List<ExportItem>();
+            }
             return items;
+        }
+
+        /// <summary>
+        /// Adds one table's items to <paramref name="items"/> and, unless --resume (<paramref name="folderFiles"/> null),
+        /// warns about data files of the table left in the folder by an earlier export that this run will not rewrite.
+        /// </summary>
+        private static void PlanExportTable(ExportOptions options, ExportManifest manifest, SqlConnection conn, TableRef table,
+            Dictionary<int, long> rowCounts, string extension, string[] folderFiles, Func<SqlConnection, TableRef, string> splitProblem, List<ExportItem> items)
+        {
+            long rows = rowCounts.TryGetValue(table.ObjectId, out long counted) ? counted : 0;
+            try
+            {
+                TableSplit split = ChooseSplit(options, manifest, conn, table, splitProblem, out List<int> partsToExport);
+                if (folderFiles != null)
+                {
+                    IEnumerable<string> written = split == null
+                        ? new[] { options.DataFileName(table.DisplayName, extension) }
+                        : split.Ranges.Select(r => options.DataFileName(PartFiles.PartName(table.DisplayName, r.Part), extension));
+                    foreach (string leftover in PartFiles.Leftovers(folderFiles, table.DisplayName, extension, written))
+                    {
+                        PostToConsole(string.Format("{0}: {1} is left from an earlier export; delete it (import ignores it while the manifest is present).",
+                            table.DisplayName, leftover), InfoLevel.Warning);
+                    }
+                }
+                if (split == null)
+                {
+                    items.Add(new ExportItem(table, null, null, rows));
+                    return;
+                }
+                for (int i = 0; i < split.Ranges.Count; i++)
+                {
+                    KeyRange range = split.Ranges[i];
+                    if (partsToExport == null || partsToExport.Contains(range.Part))
+                    {
+                        long estimate = split.EstimatedRows[i] >= 0 ? split.EstimatedRows[i] : rows / split.Ranges.Count;
+                        items.Add(new ExportItem(table, range, split, estimate));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                PostToConsole(string.Format("{0}: {1}", table.DisplayName, ex.Message), InfoLevel.Error);
+            }
         }
 
         /// <summary>
@@ -230,6 +263,15 @@ SELECT @Columns, @SortOrder;";
             return split;
         }
 
+        /// <summary>Warns about each --split-tables entry that matches none of <paramref name="tables"/>: a typo would otherwise leave the run unsplit.</summary>
+        private static void WarnUnmatchedSplitRequests(IReadOnlyList<SplitRequest> requests, List<TableRef> tables)
+        {
+            foreach (SplitRequest request in SplitRequest.Unmatched(requests, tables.Select(t => t.DisplayName)))
+            {
+                PostToConsole(string.Format("--split-tables {0}: no table matched.", request.Pattern), InfoLevel.Warning);
+            }
+        }
+
         /// <summary>One TableWork per split table, with <paramref name="before"/> (may be null) giving its preparation.</summary>
         private static Dictionary<int, TableWork> SplitTableWork(List<ExportItem> items, Func<TableRef, Action> before)
         {
@@ -258,7 +300,7 @@ SELECT @Columns, @SortOrder;";
         {
             long totalrowCount = 0;
             List<TableRef> tables = TablesToExport(options, manifest);
-            List<ExportItem> items = PlanExportItems(options, manifest, tables);
+            List<ExportItem> items = PlanExportItems(options, manifest, tables, ".json");
             Dictionary<int, TableWork> works = SplitTableWork(items, null);
 
             RunExportItems(items, options.MaxParallelTasks, item =>
@@ -555,7 +597,7 @@ ORDER BY ic.key_ordinal;";
             string connectionArgs = BcpConnectionArgs(options.srcServer, options.srcDatabase, options.srcLogin, options.srcPassword, options.TrustServerCertificate);
             string outputPath = options.exportPath;
             // Parts name every column on the bcp command line, so their names must be safe there.
-            List<ExportItem> items = PlanExportItems(options, manifest, tables, (conn, table) =>
+            List<ExportItem> items = PlanExportItems(options, manifest, tables, ".bcp", (conn, table) =>
                 ReadColumnNames(conn, table.ObjectId).All(SplitColumn.IsCommandLineSafe)
                     ? null
                     : "a column name contains characters bcp cannot take on its command line");

@@ -649,6 +649,37 @@ case "${1:-}" in
         grep -qF "both load into this table; import them separately." "$WORK/split-two-names.log" || { echo "::error::Two files for one table were not reported"; exit 1; }
         [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.Heap;")" = "1000" ] || { echo "::error::split.Heap does not hold one file's 1,000 rows"; exit 1; }
 
+        # (g) Re-exporting into the same folder with fewer parts leaves parts 5-8 behind: export names them, and import
+        #     (guided by the new manifest) skips them, so no row is loaded twice. A typo in --split-tables is reported.
+        rx="$WORK/split-reexport"
+        export_json BcpJsonSource "$rx" --include-tables split.Big --split-tables "split.Big:8"
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format json --export-path "$rx" --include-tables split.Big \
+            --split-tables "split.Big:4,split.Bgi:2" | tee "$WORK/split-reexport.log"
+        grep -qF -- "--split-tables split.Bgi: no table matched." "$WORK/split-reexport.log" || { echo "::error::The unmatched --split-tables entry was not reported"; exit 1; }
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --max-tasks 4 --truncate-target --source-path "$rx" --source-file '*.json' | tee "$WORK/split-reexport-import.log"
+        for p in 5 6 7 8; do
+            f="split.Big.part000$p.json"
+            grep -qF "split.Big: $f is left from an earlier export; delete it (import ignores it while the manifest is present)." "$WORK/split-reexport.log" \
+                || { echo "::error::Export did not report the leftover $f"; exit 1; }
+            grep -qF "split.Big: skipping $f: not part of the export in" "$WORK/split-reexport-import.log" || { echo "::error::Import did not skip $f"; exit 1; }
+        done
+        [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.Big;")" = "200000" ] || { echo "::error::split.Big does not hold 200,000 rows after importing the re-export"; exit 1; }
+        echo "Re-export with fewer parts: leftovers reported and skipped, 200,000 rows."
+
+        # A whole-table file next to part files, without a manifest to tell them apart, is refused: nothing is loaded.
+        mixed="$WORK/split-mixed"
+        rm -rf "$mixed"
+        mkdir -p "$mixed"
+        cp "$sj/split.Big.part0001.json" "$src/split.Big.json" "$mixed/"
+        if bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --truncate-target --source-path "$mixed" --source-file '*.json' > "$WORK/split-mixed.log" 2>&1; then
+            cat "$WORK/split-mixed.log"; echo "::error::A whole file mixed with part files was accepted"; exit 1
+        fi
+        cat "$WORK/split-mixed.log"
+        grep -qF "split.Big: both split.Big.json and part files are present; remove the files of the older export." "$WORK/split-mixed.log" \
+            || { echo "::error::The mix of whole and part files was not reported"; exit 1; }
+        [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.Big;")" = "200000" ] || { echo "::error::split.Big was touched by the refused import"; exit 1; }
+        echo "Whole file mixed with part files: refused, table untouched."
+
         # (b) --disable-indexes: nonclustered indexes (not the primary key) are disabled for the load and rebuilt after it.
         create_target_db BcpJsonSplitIdx
         bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitIdx --file-format json --max-tasks 4 --disable-indexes --source-path "$sj" --source-file '*.json' | tee "$WORK/split-import-idx.log"

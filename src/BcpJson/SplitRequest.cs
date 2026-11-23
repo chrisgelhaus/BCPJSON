@@ -69,6 +69,15 @@ namespace bcpJson
             return null;
         }
 
+        /// <summary>The requests whose pattern matches none of the tables (a typo leaves the run unsplit).</summary>
+        public static List<SplitRequest> Unmatched(IReadOnlyList<SplitRequest> requests, IEnumerable<string> tableDisplayNames)
+        {
+            List<string> names = tableDisplayNames.ToList();
+            return (requests ?? new List<SplitRequest>())
+                .Where(r => !names.Any(n => PartsFor(new[] { r }, n) != null))
+                .ToList();
+        }
+
         /// <summary>The warning for --split-tables without --snapshot, or null when none is due. verb is "export" or "copy".</summary>
         public static string SnapshotWarning(bool splitRequested, bool snapshot, string verb)
         {

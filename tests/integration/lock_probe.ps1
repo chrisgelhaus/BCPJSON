@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 
 $server = $env:SQL_SERVER
 $user = if ($env:SQL_USER) { $env:SQL_USER } else { 'sa' }
-$pwd = $env:SQL_PASSWORD
+$sqlPassword = $env:SQL_PASSWORD
 $db = 'bcpjson_lockprobe'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -25,10 +25,10 @@ try { $null = [System.Data.SqlClient.SqlConnection] } catch {
 }
 function New-Sql([string]$type, [object[]]$ArgList) { New-Object -TypeName "$ns.$type" -ArgumentList $ArgList }
 
-& sqlcmd -S $server -U $user -P $pwd -C -b -I -i (Join-Path $here 'schema.sql') -v "DbName=$db" | Out-Null
+& sqlcmd -S $server -U $user -P $sqlPassword -C -b -I -i (Join-Path $here 'schema.sql') -v "DbName=$db" | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'schema.sql failed' }
 
-$cs = "Server=$server;User ID=$user;Password=$pwd;Database=$db;TrustServerCertificate=True;Encrypt=True"
+$cs = "Server=$server;User ID=$user;Password=$sqlPassword;Database=$db;TrustServerCertificate=True;Encrypt=True"
 
 function Get-LockMode([string]$table) {
     $a = New-Sql SqlConnection @($cs); $b = New-Sql SqlConnection @($cs)
@@ -74,7 +74,7 @@ $clustered = Get-LockMode 'split.Big'
 $cci = Get-LockMode 'split.PartedCci'
 "heap=$heap clustered=$clustered cci=$cci"
 
-& sqlcmd -S $server -U $user -P $pwd -C -Q "ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db];" | Out-Null
+& sqlcmd -S $server -U $user -P $sqlPassword -C -Q "ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db];" | Out-Null
 
 $ok = ($heap -eq 'BU') -and ($clustered -in 'X', 'Sch-M') -and ($cci -eq 'S+X')
 if (-not $ok) { Write-Host 'Unexpected lock modes: expected heap=BU clustered=X or Sch-M cci=S+X.'; exit 1 }

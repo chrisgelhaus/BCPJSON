@@ -374,58 +374,74 @@ WHERE s.name = @schema AND t.name = @table;";
         /// <summary>
         /// The copy work items, sized by rows: one per unsplit table and one per part of a table matched by
         /// --split-tables. Ranges are planned on the source (the snapshot with --snapshot). A table copied through bcp
-        /// is never split.
+        /// is never split. When planning cannot start (no connection), the error is reported and nothing is copied.
         /// </summary>
         private static List<CopyItem> PlanCopyItems(CopyOptions setting, List<TableRef> tables, ConcurrentBag<TableRef> createdTables)
         {
+            WarnUnmatchedSplitRequests(setting.SplitRequests, tables);
             var items = new List<CopyItem>();
-            using (var conn = SqlConnectionFactory.Create(setting.SourceConnectionString()))
+            try
             {
-                conn.Open();
-                Dictionary<int, long> rowCounts = TableRowCounts(conn);
-                foreach (TableRef table in tables)
+                using (var conn = SqlConnectionFactory.Create(setting.SourceConnectionString()))
                 {
-                    long rows = rowCounts.TryGetValue(table.ObjectId, out long counted) ? counted : 0;
-                    try
+                    conn.Open();
+                    Dictionary<int, long> rowCounts = TableRowCounts(conn);
+                    foreach (TableRef table in tables)
                     {
-                        TableSplit split = null;
-                        int? requested = SplitRequest.PartsFor(setting.SplitRequests, table.DisplayName);
-                        if (requested != null)
-                        {
-                            split = SplitOrWhole(table.DisplayName, () =>
-                            {
-                                if (HasBcpOnlyColumns(conn, table.ObjectId))
-                                {
-                                    return (null, "copied through bcp (geography/geometry/hierarchyid columns)");
-                                }
-                                TableSplit planned = PlanSplit(conn, table, requested.Value, out string reason);
-                                return (planned, reason);
-                            });
-                        }
-
-                        var context = new CopyTableContext();
-                        int parts = split?.Ranges.Count ?? 1;
-                        var work = new TableWork(table.DisplayName, parts,
-                            () => PrepareCopyTarget(setting, table, context, parts),
-                            () => FinishCopiedTable(setting, table, context, parts, createdTables));
-                        if (split == null)
-                        {
-                            items.Add(new CopyItem(table, null, null, rows, context, work));
-                            continue;
-                        }
-                        for (int i = 0; i < split.Ranges.Count; i++)
-                        {
-                            long estimate = split.EstimatedRows[i] >= 0 ? split.EstimatedRows[i] : rows / split.Ranges.Count;
-                            items.Add(new CopyItem(table, split.Ranges[i], split, estimate, context, work));
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        PostToConsole(string.Format("{0}: {1}", table.DisplayName, ex.Message), InfoLevel.Error);
+                        PlanCopyTable(setting, conn, table, rowCounts, createdTables, items);
                     }
                 }
             }
+            catch (Exception ex)
+            {
+                PostToConsole(ex.Message, InfoLevel.Error);
+                return new List<CopyItem>();
+            }
             return items;
+        }
+
+        /// <summary>Adds one table's copy items to <paramref name="items"/>; a table whose planning fails is reported and left out.</summary>
+        private static void PlanCopyTable(CopyOptions setting, SqlConnection conn, TableRef table, Dictionary<int, long> rowCounts,
+            ConcurrentBag<TableRef> createdTables, List<CopyItem> items)
+        {
+            long rows = rowCounts.TryGetValue(table.ObjectId, out long counted) ? counted : 0;
+            try
+            {
+                TableSplit split = null;
+                int? requested = SplitRequest.PartsFor(setting.SplitRequests, table.DisplayName);
+                if (requested != null)
+                {
+                    split = SplitOrWhole(table.DisplayName, () =>
+                    {
+                        if (HasBcpOnlyColumns(conn, table.ObjectId))
+                        {
+                            return (null, "copied through bcp (geography/geometry/hierarchyid columns)");
+                        }
+                        TableSplit planned = PlanSplit(conn, table, requested.Value, out string reason);
+                        return (planned, reason);
+                    });
+                }
+
+                var context = new CopyTableContext();
+                int parts = split?.Ranges.Count ?? 1;
+                var work = new TableWork(table.DisplayName, parts,
+                    () => PrepareCopyTarget(setting, table, context, parts),
+                    () => FinishCopiedTable(setting, table, context, parts, createdTables));
+                if (split == null)
+                {
+                    items.Add(new CopyItem(table, null, null, rows, context, work));
+                    return;
+                }
+                for (int i = 0; i < split.Ranges.Count; i++)
+                {
+                    long estimate = split.EstimatedRows[i] >= 0 ? split.EstimatedRows[i] : rows / split.Ranges.Count;
+                    items.Add(new CopyItem(table, split.Ranges[i], split, estimate, context, work));
+                }
+            }
+            catch (Exception ex)
+            {
+                PostToConsole(string.Format("{0}: {1}", table.DisplayName, ex.Message), InfoLevel.Error);
+            }
         }
 
         /// <summary>Whether the table has geography, geometry or hierarchyid columns, which SqlBulkCopy cannot stream (copied through bcp).</summary>
@@ -554,6 +570,11 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.columns c INNER JOIN sys.types t ON t
                 string label = range == null ? item.Table.DisplayName : PartFiles.PartName(item.Table.DisplayName, range.Part);
                 try
                 {
+                    if (context.NeedsBcp && range != null)
+                    {
+                        // bcp copies whole tables; planning never splits such a table, so this would copy it once per part.
+                        throw new InvalidOperationException("this table is copied through bcp and cannot be copied in parts.");
+                    }
                     long copied = context.NeedsBcp
                         ? CopyTableViaBcp(setting, item.Table)
                         : CopyTableViaBulkCopy(setting, context, item.Table, range, item.Split?.Column, label);

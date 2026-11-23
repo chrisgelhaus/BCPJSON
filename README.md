@@ -197,7 +197,7 @@ Missing target tables are created from the source definition: columns, nullabili
 
 When `copy` creates a target table (it did not exist, or `--drop-target` dropped it), it recreates every primary key, unique constraint and index of the source table: clustered and nonclustered, unique and filtered indexes, included columns, descending keys, data compression, columnstore, XML and spatial indexes. They are built **after the data is loaded**, because bulk loading into a table without indexes (with the default table lock) is the fastest way to load, and building each index once at the end is much cheaper than maintaining it row by row. The clustered index is built first, then the others in dependency order.
 
-Indexes are created on the target database's default filegroup: filegroup placement is not copied, because the target may not have the same filegroups. A partitioned source table is the exception: when the target database already has a partition scheme with the same name, the table (and its indexes) is created on it; otherwise it is created unpartitioned. Index and constraint names are kept, except for constraints that were declared without a name (such as `PRIMARY KEY` on a column): SQL Server named those itself (`PK__Orders__3214EC07…`), and the copy gets its own system-generated name, just as running the original `CREATE TABLE` would. An index that cannot be created is reported as an error (exit code 1) and the remaining indexes are still created.
+Indexes are created on the target database's default filegroup: filegroup placement is not copied, because the target may not have the same filegroups. A partitioned source table is the exception: when the target database already has a partition scheme with the same name, the table (and its indexes) is created on it; otherwise it is created unpartitioned. That scheme's partition function must take the type of the table's partitioning column, or creating the table fails. Index and constraint names are kept, except for constraints that were declared without a name (such as `PRIMARY KEY` on a column): SQL Server named those itself (`PK__Orders__3214EC07…`), and the copy gets its own system-generated name, just as running the original `CREATE TABLE` would. An index that cannot be created is reported as an error (exit code 1) and the remaining indexes are still created.
 
 A target table that **already exists** keeps its own indexes; `copy` does not add, change or remove them.
 
@@ -508,7 +508,7 @@ A table that cannot be split is exported whole, with a warning of the form `<tab
 
 ### Part files and the manifest
 
-A split table writes `<schema>.<table>.part0001.json` (`.json.gz` with `--compress gzip`), `.part0002.json`, and so on, each holding one key range in key order, so the parts in order are the rows of the single file. BCP parts are `<schema>.<table>.part0001.bcp` and so on; they share one `<schema>.<table>-c.fmt` and each part has its own `_error.log` and `_output.log`.
+A split table writes `<schema>.<table>.part0001.json` (`.json.gz` with `--compress gzip`), `.part0002.json`, and so on, each holding one key range. When the split column leads the primary key, the parts in order are exactly the single file's rows; otherwise (a partitioned table split on its partitioning column but sorted by another key) they hold the same rows in a different order. BCP parts are `<schema>.<table>.part0001.bcp` and so on; they share one `<schema>.<table>-c.fmt` and each part has its own `_error.log` and `_output.log`.
 
 In `bcpjson-manifest.json` the table stays one entry that lists all its part files, plus a `split` object recording how it was cut:
 
@@ -536,6 +536,10 @@ In `bcpjson-manifest.json` the table stays one entry that lists all its part fil
 
 `kind` is `histogram` or `partition` (which also records `partitionFunction` and `rangeRight`). Boundaries are stored as the text SQL Server converts the key to. `verify` checks every part file like any other file and reports `<table>: <k> of <n> parts exported.` when a split table is missing parts.
 
+Export never deletes files. Re-exporting into a folder that holds an earlier export can leave data files behind (fewer parts than before, other boundaries, or a table that was split and now is not, or the other way round); export names each one: `<table>: <file> is left from an earlier export; delete it (import ignores it while the manifest is present).` When the source folder has a `bcpjson-manifest.json`, import loads only the files the manifest lists for a table it knows (`<table>: skipping <file>: not part of the export in <manifest>.`) and refuses a split table whose export is unfinished (`<table>: the export is incomplete (<k> of <n> parts); finish it with export --resume.`). Files of tables the manifest does not mention are loaded as before. With or without a manifest, a table that has both a whole-table file and part files is refused, and nothing is loaded into it: `<table>: both <file> and part files are present; remove the files of the older export.`
+
+A `--split-tables` entry that matches none of the exported or copied tables is reported (`--split-tables <pattern>: no table matched.`), so a typo does not go unnoticed.
+
 ### Resuming and retrying
 
 Each part is exported, retried and recorded on its own. After an interruption, `export --resume` keeps the recorded split (it says `<table>: --resume keeps its recorded split (<n> parts).` when your `--split-tables` differs or is missing, because new boundaries would not match the parts already written), skips the parts whose files are intact and exports only the rest (`<table>: <k> part(s) to go.`). A transient error therefore redoes one part, not the table.
@@ -552,13 +556,13 @@ Each part is exported, retried and recorded on its own. After an interruption, `
 | Clustered columnstore index | One after another (`columnstore`; measured in CI: a columnstore load takes S and X locks, not bulk-update) | Parallel |
 | Table with geography/geometry/hierarchyid columns (JSON) | One after another (`CLR columns`; loaded through a staging table that always takes a table lock) | One after another |
 
-Parts are never loaded in the wrong order: when they load one after another they go in key order, so a clustered table receives sorted rows. For a partitioned target with `--no-table-lock`, bcpJson suggests `ALTER TABLE ... SET (LOCK_ESCALATION = AUTO)`, which lets parts in different partitions load without blocking each other.
+When parts load one after another they go in part (key) order; a clustered table therefore receives sorted rows when the split column is the leading column of its clustered key. For a partitioned target with `--no-table-lock`, bcpJson suggests `ALTER TABLE ... SET (LOCK_ESCALATION = AUTO)`, which lets parts in different partitions load without blocking each other.
 
 ### Load first, index afterwards: `--disable-indexes`
 
 **Applies to:** `import` (JSON and BCP), all tables of the run. **Default:** off.
 
-The tables that matter most for a restore are those with many nonclustered indexes, and every index slows every row of the load. `--disable-indexes` is the "load first, index afterwards" restore: before a table's first part it disables the table's nonclustered indexes, so its parts can load in parallel; after the last part it rebuilds them, once each.
+The tables that matter most for a restore are those with many nonclustered indexes, and every index slows every row of the load. `--disable-indexes` is the "load first, index afterwards" restore: before a table's first part it disables the table's nonclustered indexes; after the last part it rebuilds them, once each. The gain is that the load maintains fewer indexes. Whether the parts then load in parallel still follows the [load-mode table](#importing-parts-and-how-they-load): a heap whose indexes are all disabled loads them in parallel, while a table with a clustered primary key (which is never disabled) still loads one part after another.
 
 - **Not disabled:** the primary key, the clustered index, and any index a foreign key references (disabling those would block the load or the keys). Unique indexes are disabled and checked again on rebuild, so duplicate rows fail the rebuild, not the load.
 - **Always rebuilt:** the rebuild runs even when the load failed part way, so the table is not left with disabled indexes. An index that cannot be rebuilt is reported as an error by name together with the `ALTER INDEX ... REBUILD` command to run by hand; the others are still rebuilt.
@@ -594,7 +598,7 @@ Each file is a JSON array with one object per row, one row per line:
 - BCP exports (`bcp out`) are not ordered, so BCP files are not reliably diff-able; JSON files are.
 - `sql_variant` values are re-imported as `nvarchar`.
 - `copy --source-query` is not supported.
-- `copy` recreates keys, indexes and check constraints (and foreign keys and triggers on request), but not other objects such as views, procedures, functions or DDL triggers; indexes are placed on the target's default filegroup. A partitioned source table is created on the target's partition scheme of the same name if there is one, and unpartitioned otherwise.
+- `copy` recreates keys, indexes and check constraints (and foreign keys and triggers on request), but not other objects such as views, procedures, functions or DDL triggers; indexes are placed on the target's default filegroup. A partitioned source table is created on the target's partition scheme of the same name if there is one (its function must take the partitioning column's type, or creating the table fails), and unpartitioned otherwise.
 - **Split tables:** a key with one dominant value cannot be cut inside that value, and text keys may yield fewer parts than asked; BCP exports are unordered, so BCP imports give SQL Server no `ORDER` hint; `--batch-size 0` is one transaction per part, not per table; and a real table whose name ends in `.part` and four digits (for example `dbo.x.part0001`) is read as a part on import. bcpJson does not test loading a table with a sparse column set through JSON import or copy; such tables are never split.
 - `import` bulk loads without checking constraints (the bcp and SqlBulkCopy default, which is what makes it fast). Foreign key and check constraints on the target tables are not validated during the load and SQL Server marks them as not trusted; run `ALTER TABLE ... WITH CHECK CHECK CONSTRAINT ALL` afterwards if you need them trusted.
 - BCP import into a table whose schema or table name contains `.` or `"` **and** that has a filtered, XML or spatial index fails (bcp cannot set `QUOTED_IDENTIFIER ON` for such names). Use JSON import for that table.
@@ -630,7 +634,7 @@ The solution `BcpJson.sln` holds the app in `src/BcpJson/` and the xUnit tests i
 | `Program.Resilience.cs` | Retries for transient failures, `.partial` files |
 | `Program.Verify.cs` | The `verify` verb |
 | `ExportManifest.cs` | `bcpjson-manifest.json`: read, write, file hashes, resume checks |
-| `Program.Split.cs` | Planning and running split exports and split copies |
+| `Program.Split.cs` | Split planning: `TableSplit` and `PlanSplit` (the split exports and copies run in `Program.Export.cs` and `Program.Copy.cs`) |
 | `Program.Indexes.cs` | `--disable-indexes`: disabling and rebuilding indexes |
 | `SplitRequest.cs`, `KeyRange.cs`, `KeyInterpolation.cs`, `RangePlanner.cs` | `--split-tables` parsing, key ranges and boundary selection |
 | `PartFiles.cs`, `LoadPlanning.cs`, `WorkQueue.cs` | Part file names, parallel or sequential loading, per-table work ordering |

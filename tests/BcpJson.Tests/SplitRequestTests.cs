@@ -35,6 +35,14 @@ namespace bcpJson.Tests
             Assert.Null(SplitRequest.PartsFor(r, "sales.X"));
         }
 
+        [Fact]
+        public void Lists_requests_that_match_no_table()
+        {
+            var r = new List<SplitRequest> { new("dbo.History", 32), new("dbo.Hsitory", 4), new("Sales.*", 8) };
+            Assert.Equal(new[] { "dbo.Hsitory" }, SplitRequest.Unmatched(r, new[] { "DBO.history", "Sales.Order" }).Select(x => x.Pattern));
+            Assert.Empty(SplitRequest.Unmatched(new List<SplitRequest>(), new[] { "dbo.T" }));
+        }
+
         [Theory]
         [InlineData("export")]
         [InlineData("copy")]

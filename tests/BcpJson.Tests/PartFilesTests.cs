@@ -35,5 +35,91 @@ namespace bcpJson.Tests
             Assert.Equal("dbo.Target", group.TableName);
             Assert.Equal(new[] { "x.part0001.json", "x.part0002.json" }, group.Files);
         }
+
+        private static ExportManifest Manifest(params ManifestTable[] tables) => new ExportManifest { Tables = tables.ToList() };
+
+        private static ManifestTable Entry(string name, params string[] files) =>
+            new ManifestTable { Name = name, Files = files.Select(f => new ManifestFile { Name = f }).ToList() };
+
+        private static ManifestTable SplitEntry(string name, int partCount, int recorded)
+        {
+            ManifestTable entry = Entry(name, Enumerable.Range(1, recorded).Select(p => PartFiles.PartName(name, p) + ".json").ToArray());
+            entry.Split = new ManifestSplit
+            {
+                PartCount = partCount,
+                Parts = Enumerable.Range(1, recorded).Select(p => new ManifestPart { Part = p }).ToList()
+            };
+            return entry;
+        }
+
+        [Fact]
+        public void Manifest_skips_files_it_does_not_list()
+        {
+            var files = new[] { "dbo.T.part0001.json", "dbo.T.part0002.json", "dbo.T.part0003.json", "dbo.T.json" };
+            ImportSelection selection = PartFiles.SelectImportFiles(files, Manifest(SplitEntry("dbo.T", 2, 2)), "m.json");
+            Assert.Equal(new[] { "dbo.T.part0001.json", "dbo.T.part0002.json" }, selection.Files);
+            Assert.Empty(selection.Errors);
+            Assert.Equal(new[]
+            {
+                "dbo.T: skipping dbo.T.part0003.json: not part of the export in m.json.",
+                "dbo.T: skipping dbo.T.json: not part of the export in m.json."
+            }, selection.Warnings);
+        }
+
+        [Fact]
+        public void Manifest_refuses_an_incomplete_split()
+        {
+            var files = new[] { "dbo.T.part0001.json", "dbo.T.part0002.json" };
+            ImportSelection selection = PartFiles.SelectImportFiles(files, Manifest(SplitEntry("dbo.T", 4, 2)), "m.json");
+            Assert.Empty(selection.Files);
+            Assert.Equal(new[] { "dbo.T: the export is incomplete (2 of 4 parts); finish it with export --resume." }, selection.Errors);
+        }
+
+        [Fact]
+        public void Files_the_manifest_does_not_know_are_kept()
+        {
+            var files = new[] { "dbo.Hand.json", "dbo.T.json" };
+            ImportSelection selection = PartFiles.SelectImportFiles(files, Manifest(Entry("dbo.T", "dbo.T.json", "dbo.T-c.fmt")), "m.json");
+            Assert.Equal(files, selection.Files);
+            Assert.Empty(selection.Warnings);
+            Assert.Empty(selection.Errors);
+        }
+
+        [Fact]
+        public void Mixed_whole_and_part_files_are_refused_without_a_manifest()
+        {
+            var files = new[] { "dbo.T.part0001.json", "dbo.T.json.gz", "dbo.U.json" };
+            ImportSelection selection = PartFiles.SelectImportFiles(files, null, null);
+            Assert.Equal(new[] { "dbo.T: both dbo.T.json.gz and part files are present; remove the files of the older export." }, selection.Errors);
+            Assert.Empty(selection.Files);
+        }
+
+        [Fact]
+        public void Manifest_resolves_a_mix_before_it_is_refused()
+        {
+            var files = new[] { "dbo.T.part0001.json", "dbo.T.part0002.json", "dbo.T.json" };
+            ImportSelection selection = PartFiles.SelectImportFiles(files, Manifest(Entry("dbo.T", "dbo.T.json")), "m.json");
+            Assert.Equal(new[] { "dbo.T.json" }, selection.Files);
+            Assert.Empty(selection.Errors);
+            Assert.Equal(2, selection.Warnings.Count);
+        }
+
+        [Fact]
+        public void Unsplit_files_without_a_manifest_are_kept()
+        {
+            var files = new[] { "dbo.T.part0001.json", "dbo.T.part0002.json" };
+            ImportSelection selection = PartFiles.SelectImportFiles(files, null, null);
+            Assert.Equal(files, selection.Files);
+            Assert.Empty(selection.Errors);
+        }
+
+        [Theory]
+        [InlineData(new[] { "dbo.T.part0001.json" }, new[] { "dbo.T.json", "dbo.T.json.gz", "dbo.T.part0002.json", "dbo.T.part0001.json.partial", "dbo.T-c.fmt", "dbo.U.json", "dbo.T.bcp", "bcpjson-manifest.json" },
+            new[] { "dbo.T.json", "dbo.T.json.gz", "dbo.T.part0002.json" })]
+        [InlineData(new[] { "dbo.T.json" }, new[] { "dbo.T.json", "dbo.T.part0001.json.gz", "dbo.Tx.json" }, new[] { "dbo.T.part0001.json.gz" })]
+        public void Leftovers_are_data_files_of_the_table_this_run_does_not_write(string[] written, string[] folder, string[] expected)
+        {
+            Assert.Equal(expected, PartFiles.Leftovers(folder, "dbo.T", ".json", written));
+        }
     }
 }

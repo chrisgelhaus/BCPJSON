@@ -158,12 +158,22 @@ namespace bcpJson
             var byName = files.ToDictionary(f => f.Name, StringComparer.Ordinal);
             var items = new List<ImportItem>();
             var firstFileOfTable = new Dictionary<int, string>();
+            // The manifest of the export, if the folder has one, says which files belong to it (see PartFiles.SelectImportFiles).
+            ExportManifest manifest = ExportManifest.Load(options.SourcePath);
+            string manifestPath = ExportManifest.PathIn(options.SourcePath);
             using (var conn = SqlConnectionFactory.Create(options.GetTargetConnectionString()))
             {
                 conn.Open();
                 foreach (ImportGroup group in PartFiles.GroupImportFiles(files.Select(f => f.Name), options.TargetTable))
                 {
-                    List<FileInfo> groupFiles = group.Files.Select(n => byName[n]).ToList();
+                    ImportSelection selection = PartFiles.SelectImportFiles(group.Files, manifest, manifestPath);
+                    selection.Warnings.ForEach(w => PostToConsole(w, InfoLevel.Warning));
+                    selection.Errors.ForEach(e => PostToConsole(e, InfoLevel.Error));
+                    if (selection.Files.Count == 0)
+                    {
+                        continue;
+                    }
+                    List<FileInfo> groupFiles = selection.Files.Select(n => byName[n]).ToList();
                     try
                     {
                         items.AddRange(PlanImportTable(conn, options, group.TableName, groupFiles, json, firstFileOfTable));
