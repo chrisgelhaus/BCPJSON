@@ -192,13 +192,13 @@ SELECT @Columns, @SortOrder;";
             {
                 return null;
             }
-            string problem = splitProblem?.Invoke(conn, table);
-            if (problem != null)
-            {
-                return SplitOrWhole(name, () => (null, problem));
-            }
             return SplitOrWhole(name, () =>
             {
+                string problem = splitProblem?.Invoke(conn, table);
+                if (problem != null)
+                {
+                    return (null, problem);
+                }
                 TableSplit planned = PlanSplit(conn, table, requested.Value, out string reason);
                 return (planned, reason);
             });

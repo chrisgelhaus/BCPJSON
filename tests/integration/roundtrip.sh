@@ -541,20 +541,28 @@ case "${1:-}" in
         ls -l "$sb"
         [ "$(part_count "$sb" split.Big bcp)" = "4" ] || { echo "::error::split.Big has no 4 BCP parts"; exit 1; }
         [ -f "$sb/split.Big-c.fmt" ] || { echo "::error::split.Big has no format file"; exit 1; }
+        # What bcp wrote to the parts' error logs (row errors, or only warnings).
+        for f in "$sb"/*_error.log; do
+            if [ -s "$f" ]; then
+                echo "--- $(basename "$f"):"
+                cat "$f"
+                echo
+            fi
+        done
         bcpjson verify --path "$sb"
         diff <(jq -r '.tables[] | select(.name == "split.Big" or .name == "split.Text" or .name == "split.Descending" or .name == "split.Parted") | "\(.name) \(.rows)"' "$src/$MANIFEST") \
              <(jq -r '.tables[] | "\(.name) \(.rows)"' "$sb/$MANIFEST") || { echo "::error::Split BCP export row counts differ"; exit 1; }
 
         # BCP parts name the columns the format file lists. bcp format leaves out the HIDDEN period columns of a temporal
         # table, so the parts must too: every row has exactly the format file's fields.
-        sql -Q "DROP DATABASE IF EXISTS BcpJsonTemporal; CREATE DATABASE BcpJsonTemporal;"
-        sql -d BcpJsonTemporal -Q "CREATE TABLE dbo.Versioned (Id INT NOT NULL CONSTRAINT PK_Versioned PRIMARY KEY CLUSTERED, Val INT NOT NULL,
+        sql -Q "DROP DATABASE IF EXISTS BcpJsonSplitOdd; CREATE DATABASE BcpJsonSplitOdd;"
+        sql -d BcpJsonSplitOdd -Q "CREATE TABLE dbo.Versioned (Id INT NOT NULL CONSTRAINT PK_Versioned PRIMARY KEY CLUSTERED, Val INT NOT NULL,
             ValidFrom DATETIME2(7) GENERATED ALWAYS AS ROW START HIDDEN NOT NULL, ValidTo DATETIME2(7) GENERATED ALWAYS AS ROW END HIDDEN NOT NULL,
             PERIOD FOR SYSTEM_TIME (ValidFrom, ValidTo)) WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = dbo.VersionedHistory));"
-        sql -d BcpJsonTemporal -Q "SET NOCOUNT ON; INSERT dbo.Versioned (Id, Val) SELECT TOP (20000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), 1 FROM sys.all_objects a CROSS JOIN sys.all_objects b; UPDATE STATISTICS dbo.Versioned WITH FULLSCAN;"
+        sql -d BcpJsonSplitOdd -Q "SET NOCOUNT ON; INSERT dbo.Versioned (Id, Val) SELECT TOP (20000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), 1 FROM sys.all_objects a CROSS JOIN sys.all_objects b; UPDATE STATISTICS dbo.Versioned WITH FULLSCAN;"
         st="$WORK/split-temporal"
         rm -rf "$st"
-        bcpjson export "${SOURCE[@]}" --source-database BcpJsonTemporal --file-format bcp --export-path "$st" \
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSplitOdd --file-format bcp --export-path "$st" \
             --include-tables dbo.Versioned --split-tables "dbo.Versioned:4" | tee "$WORK/split-temporal.log"
         [ "$(part_count "$st" dbo.Versioned bcp)" = "4" ] || { echo "::error::dbo.Versioned has no 4 BCP parts"; exit 1; }
         bcpjson verify --path "$st"
@@ -565,7 +573,19 @@ case "${1:-}" in
             echo "::error::BCP part rows do not have the format file's $fields fields"; exit 1
         fi
         echo "Temporal table: 4 BCP parts, 20,000 rows of $fields fields each."
-        sql -Q "ALTER DATABASE BcpJsonTemporal SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE BcpJsonTemporal;"
+
+        # A sparse column set changes the columns a table returns, so such a table is not split (whatever the format)
+        # and is exported whole. It lives here, not in BcpJsonSource: imports cannot load a column set and its columns.
+        sql -d BcpJsonSplitOdd -Q "EXEC (N'CREATE SCHEMA split'); CREATE TABLE split.ColumnSet (Id INT NOT NULL CONSTRAINT PK_ColumnSet PRIMARY KEY CLUSTERED,
+            Code VARCHAR(10) NOT NULL, A INT SPARSE NULL, B NVARCHAR(20) SPARSE NULL, Props XML COLUMN_SET FOR ALL_SPARSE_COLUMNS);"
+        sql -d BcpJsonSplitOdd -Q "SET NOCOUNT ON; INSERT split.ColumnSet (Id, Code, A, B) SELECT TOP (300) n, CONCAT('c', n), CASE WHEN n % 2 = 0 THEN n END, CASE WHEN n % 3 = 0 THEN CONCAT(N'b', n) END
+            FROM (SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects) AS x; UPDATE STATISTICS split.ColumnSet WITH FULLSCAN;"
+        export_json BcpJsonSplitOdd "$WORK/split-columnset" --include-tables split.ColumnSet --split-tables "split.*:4" | tee "$WORK/split-columnset.log"
+        grep -qF "split.ColumnSet: not split: the table has a sparse column set." "$WORK/split-columnset.log" || { echo "::error::split.ColumnSet was not declined"; exit 1; }
+        [ -s "$WORK/split-columnset/split.ColumnSet.json" ] && [ "$(part_count "$WORK/split-columnset" split.ColumnSet json)" = "0" ] \
+            || { echo "::error::split.ColumnSet was not exported as one file"; ls -l "$WORK/split-columnset"; exit 1; }
+        echo "Sparse column set: not split, exported whole."
+        sql -Q "ALTER DATABASE BcpJsonSplitOdd SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE BcpJsonSplitOdd;"
 
         # 4. --resume after losing one part, without --split-tables: the recorded split is kept and only that part redone.
         res="$WORK/split-resume"

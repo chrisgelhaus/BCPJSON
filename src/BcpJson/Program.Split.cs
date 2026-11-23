@@ -299,6 +299,12 @@ SELECT p.object_id, SUM(p.rows) FROM sys.partitions p WHERE p.index_id IN (0, 1)
         /// </summary>
         internal static TableSplit PlanSplit(SqlConnection conn, TableRef table, int parts, out string reason)
         {
+            reason = UnsplittableTable(conn, table.ObjectId);
+            if (reason != null)
+            {
+                return null;
+            }
+
             const string shapeSql = @"SET NOCOUNT ON;
 SELECT TOP (1) i.index_id, i.type, ds.type, pf.function_id, pf.name, pf.boundary_value_on_right
 FROM sys.indexes i
@@ -406,6 +412,39 @@ FROM sys.dm_db_stats_histogram(@objectId, 1) h ORDER BY h.step_number;";
                 }
             }
             return TableSplit.FromHistogram(column, steps, parts, out reason);
+        }
+
+        /// <summary>
+        /// Why a table is never split whatever its keys, or null. A sparse column set changes the columns SELECT * and
+        /// bcp return (the set as XML instead of the sparse columns), and graph tables have internal columns; the
+        /// column lists of their parts could not be made to match a whole-table export.
+        /// </summary>
+        private static string UnsplittableTable(SqlConnection conn, int objectId)
+        {
+            const string sql = @"SET NOCOUNT ON;
+SELECT CASE WHEN t.is_node = 1 OR t.is_edge = 1 THEN 1 ELSE 0 END,
+       CASE WHEN EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id = t.object_id AND c.is_column_set = 1) THEN 1 ELSE 0 END
+FROM sys.tables t WHERE t.object_id = @objectId;";
+            using (var cmd = new SqlCommand(sql, conn))
+            {
+                cmd.Parameters.Add("@objectId", SqlDbType.Int).Value = objectId;
+                using (var reader = cmd.ExecuteReader())
+                {
+                    if (!reader.Read())
+                    {
+                        throw new InvalidOperationException("Could not read the table.");
+                    }
+                    if (reader.GetInt32(0) == 1)
+                    {
+                        return "graph tables are not split";
+                    }
+                    if (reader.GetInt32(1) == 1)
+                    {
+                        return "the table has a sparse column set";
+                    }
+                }
+            }
+            return null;
         }
 
         /// <summary>
