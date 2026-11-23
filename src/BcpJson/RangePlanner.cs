@@ -57,7 +57,7 @@
                     LowerInclusive = i > 0,
                     Upper = i == count - 1 ? null : boundaries[i],
                     UpperInclusive = false,
-                    IncludeNulls = nullable && i == 0
+                    IncludeNulls = nullable && count > 1 && i == 0
                 });
             }
             if (descending)
@@ -72,8 +72,9 @@
         /// </summary>
         public static List<(int First, int Last)> GroupPartitions(IReadOnlyList<long> rowsPerPartition, int parts)
         {
+            if (rowsPerPartition.Count == 0)
+                throw new ArgumentException("At least one partition is required.", nameof(rowsPerPartition));
             var groups = new List<(int First, int Last)>();
-            var groupRows = new List<long>();
             long remaining = 0;
             foreach (long rows in rowsPerPartition) remaining += rows;
 
@@ -87,26 +88,13 @@
                 if (groupsLeft > 1 && rowsAfter && current > 0 && current >= (double)remaining / groupsLeft)
                 {
                     groups.Add((first, p));
-                    groupRows.Add(current);
                     remaining -= current;
                     current = 0;
                     first = p + 1;
                 }
             }
             if (first <= rowsPerPartition.Count)
-            {
-                groups.Add((first, rowsPerPartition.Count));
-                groupRows.Add(current);
-            }
-
-            // A trailing group without rows adds nothing: fold it into the previous one.
-            while (groups.Count > 1 && groupRows[groups.Count - 1] == 0)
-            {
-                int n = groups.Count;
-                groups[n - 2] = (groups[n - 2].First, groups[n - 1].Last);
-                groups.RemoveAt(n - 1);
-                groupRows.RemoveAt(n - 1);
-            }
+                groups.Add((first, rowsPerPartition.Count)); // a group only closes while rows remain, so this one is never empty
             return groups;
         }
 
@@ -118,7 +106,18 @@
         public static List<KeyRange> PartitionRanges(IReadOnlyList<string> boundaryValues, bool rangeRight,
             IReadOnlyList<(int First, int Last)> groups, bool nullable)
         {
+            if (boundaryValues.Any(v => v == null))
+                throw new ArgumentException("A NULL partition boundary value cannot be used as a range bound.", nameof(boundaryValues));
             int partitionCount = boundaryValues.Count + 1;
+            int expectedFirst = 1;
+            foreach (var g in groups)
+            {
+                if (g.First != expectedFirst || g.Last < g.First)
+                    throw new ArgumentException("Partition groups must be contiguous and start at 1.", nameof(groups));
+                expectedFirst = g.Last + 1;
+            }
+            if (expectedFirst != partitionCount + 1)
+                throw new ArgumentException("Partition groups must end at the last partition.", nameof(groups));
             var ranges = new List<KeyRange>(groups.Count);
             for (int i = 0; i < groups.Count; i++)
             {
@@ -130,7 +129,7 @@
                     LowerInclusive = first > 1 && rangeRight,
                     Upper = last < partitionCount ? boundaryValues[last - 1] : null,
                     UpperInclusive = last < partitionCount && !rangeRight,
-                    IncludeNulls = nullable && first == 1
+                    IncludeNulls = nullable && groups.Count > 1 && first == 1
                 });
             }
             return ranges;

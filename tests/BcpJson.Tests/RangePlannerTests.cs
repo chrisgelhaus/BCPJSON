@@ -50,6 +50,75 @@ namespace bcpJson.Tests
             Assert.Null(desc[2].Lower);
         }
 
+        [Fact]
+        public void A_single_nullable_range_is_unbounded_not_null_only()
+        {
+            var col = new SplitColumn { Name = "K", TypeName = "int", Nullable = true };
+            var h = RangePlanner.HistogramRanges(new string[0], nullable: true, descending: false);
+            Assert.Single(h); Assert.False(h[0].IncludeNulls); Assert.Equal("1 = 1", h[0].Predicate(col));
+            var p = RangePlanner.PartitionRanges(new[] { "a", "b" }, true, new[] { (1, 3) }, nullable: true);
+            Assert.Single(p); Assert.False(p[0].IncludeNulls); Assert.Equal("1 = 1", p[0].Predicate(col));
+        }
+
+        [Fact]
+        public void Null_boundary_value_is_rejected()
+        {
+            Assert.Throws<ArgumentException>(() => RangePlanner.PartitionRanges(new string[] { "a", null }, true, new[] { (1, 3) }, false));
+        }
+
+        [Fact]
+        public void Partition_groups_must_be_contiguous_and_complete()
+        {
+            var b = new[] { "a", "b", "c" };
+            Assert.Throws<ArgumentException>(() => RangePlanner.PartitionRanges(b, true, new[] { (2, 4) }, false));
+            Assert.Throws<ArgumentException>(() => RangePlanner.PartitionRanges(b, true, new[] { (1, 2), (4, 4) }, false));
+            Assert.Throws<ArgumentException>(() => RangePlanner.PartitionRanges(b, true, new[] { (1, 2), (3, 3) }, false));
+        }
+
+        [Fact]
+        public void Grouping_no_partitions_is_rejected()
+        {
+            Assert.Throws<ArgumentException>(() => RangePlanner.GroupPartitions(new long[0], 2));
+        }
+
+        [Fact]
+        public void One_part_chooses_no_boundaries()
+        {
+            Assert.Empty(RangePlanner.ChooseHistogramSteps(Steps((0, 5), (0, 5), (0, 5)), 1));
+        }
+
+        [Fact]
+        public void Middle_group_has_both_bounds()
+        {
+            var r = RangePlanner.PartitionRanges(new[] { "a", "b", "c", "d" }, true, new[] { (1, 2), (3, 4), (5, 5) }, nullable: true);
+            Assert.Equal("b", r[1].Lower); Assert.True(r[1].LowerInclusive);
+            Assert.Equal("d", r[1].Upper); Assert.False(r[1].UpperInclusive);
+            Assert.False(r[1].IncludeNulls);
+        }
+
+        static void AssertAdjacent(List<KeyRange> r)
+        {
+            for (int i = 0; i + 1 < r.Count; i++)
+            {
+                Assert.Equal(r[i].Upper, r[i + 1].Lower);
+                Assert.NotNull(r[i].Upper);
+                Assert.NotEqual(r[i].UpperInclusive, r[i + 1].LowerInclusive);
+            }
+        }
+
+        [Fact]
+        public void Adjacent_ranges_share_bounds_with_complementary_inclusivity()
+        {
+            var b = new[] { "10", "20", "30" };
+            AssertAdjacent(RangePlanner.HistogramRanges(b, true, false));
+            var desc = RangePlanner.HistogramRanges(b, true, true);
+            desc.Reverse();
+            AssertAdjacent(desc);
+            var groups = new[] { (1, 1), (2, 3), (4, 4) };
+            AssertAdjacent(RangePlanner.PartitionRanges(b, true, groups, true));
+            AssertAdjacent(RangePlanner.PartitionRanges(b, false, groups, true));
+        }
+
         [Theory]
         [InlineData(new long[] { 100, 100, 100, 100 }, 2, "1-2,3-4")]
         [InlineData(new long[] { 0, 100, 100, 0, 100, 100, 0 }, 2, "1-3,4-7")]
