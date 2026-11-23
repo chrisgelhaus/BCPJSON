@@ -545,8 +545,8 @@ case "${1:-}" in
         diff <(jq -r '.tables[] | select(.name == "split.Big" or .name == "split.Text" or .name == "split.Descending" or .name == "split.Parted") | "\(.name) \(.rows)"' "$src/$MANIFEST") \
              <(jq -r '.tables[] | "\(.name) \(.rows)"' "$sb/$MANIFEST") || { echo "::error::Split BCP export row counts differ"; exit 1; }
 
-        # BCP parts name every column like the format file, including the HIDDEN period columns of a temporal table
-        # (SELECT * would leave them out and the rows would not match the format file).
+        # BCP parts name the columns the format file lists. bcp format leaves out the HIDDEN period columns of a temporal
+        # table, so the parts must too: every row has exactly the format file's fields.
         sql -Q "DROP DATABASE IF EXISTS BcpJsonTemporal; CREATE DATABASE BcpJsonTemporal;"
         sql -d BcpJsonTemporal -Q "CREATE TABLE dbo.Versioned (Id INT NOT NULL CONSTRAINT PK_Versioned PRIMARY KEY CLUSTERED, Val INT NOT NULL,
             ValidFrom DATETIME2(7) GENERATED ALWAYS AS ROW START HIDDEN NOT NULL, ValidTo DATETIME2(7) GENERATED ALWAYS AS ROW END HIDDEN NOT NULL,
@@ -560,7 +560,7 @@ case "${1:-}" in
         bcpjson verify --path "$st"
         [ "$(jq '.tables[] | select(.name == "dbo.Versioned") | .rows' "$st/$MANIFEST")" = "20000" ] || { echo "::error::dbo.Versioned rows"; exit 1; }
         fields="$(sed -n 2p "$st/dbo.Versioned-c.fmt" | tr -d '[:space:]')"
-        [ "$fields" = "4" ] || { echo "::error::Format file of dbo.Versioned lists $fields columns, expected 4 (hidden ones included)"; exit 1; }
+        [ "$fields" = "2" ] || { echo "::error::Format file of dbo.Versioned lists $fields columns, expected 2 (hidden ones left out)"; exit 1; }
         if cat "$st"/dbo.Versioned.part*.bcp | awk -F'|' -v n="$fields" 'NF != n { bad++ } END { exit bad > 0 ? 0 : 1 }'; then
             echo "::error::BCP part rows do not have the format file's $fields fields"; exit 1
         fi

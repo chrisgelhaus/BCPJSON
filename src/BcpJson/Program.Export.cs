@@ -653,8 +653,7 @@ ORDER BY ic.key_ordinal;";
 
         /// <summary>
         /// Writes one key range of a table with bcp queryout to &lt;part&gt;.bcp (via .partial; gzip as for tables).
-        /// <paramref name="selectList"/> names every column in column_id order, hidden ones included, as the format file
-        /// does. The range's boundaries are typed literals in the query, because bcp takes no parameters.
+        /// <paramref name="selectList"/> names the columns the format file lists, in column_id order. The range's boundaries are typed literals in the query, because bcp takes no parameters.
         /// </summary>
         private static long ExportPartToBcp(ExportOptions options, ExportItem item, string selectList, string partName, string connectionArgs, string outputPath)
         {
@@ -682,11 +681,14 @@ ORDER BY ic.key_ordinal;";
             }
         }
 
-        /// <summary>Every column of a table in column_id order (hidden period columns included), as bcp format lists them.</summary>
+        /// <summary>
+        /// The columns bcp format lists for a table, in column_id order: every column except HIDDEN ones (temporal period
+        /// columns), which bcp leaves out like SELECT *.
+        /// </summary>
         private static List<string> ReadColumnNames(SqlConnection conn, int objectId)
         {
             var names = new List<string>();
-            using (var cmd = new SqlCommand("SET NOCOUNT ON; SELECT name FROM sys.columns WHERE object_id = @objectId ORDER BY column_id;", conn))
+            using (var cmd = new SqlCommand("SET NOCOUNT ON; SELECT name FROM sys.columns WHERE object_id = @objectId AND is_hidden = 0 ORDER BY column_id;", conn))
             {
                 cmd.Parameters.Add("@objectId", SqlDbType.Int).Value = objectId;
                 using (var reader = cmd.ExecuteReader())
