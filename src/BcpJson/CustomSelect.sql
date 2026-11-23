@@ -4,7 +4,14 @@ SET NOCOUNT ON;
 DECLARE @Columns NVARCHAR(MAX), @SortOrder NVARCHAR(MAX);
 
 SELECT   @Columns = COALESCE(@Columns + N', ', N'') +
-                    CASE WHEN sc.system_type_id = 240
+                    CASE WHEN sc.system_type_id = 240 AND TYPE_NAME(sc.user_type_id) IN (N'geography', N'geometry')
+                         /* SRIDs other than the one ::Parse() assumes (geography 4326, geometry 0) get an SRID=n; prefix. */
+                         THEN N'CASE WHEN ' + QUOTENAME(sc.name) + N'.STSrid = '
+                              + CASE TYPE_NAME(sc.user_type_id) WHEN N'geography' THEN N'4326' ELSE N'0' END
+                              + N' THEN ' + QUOTENAME(sc.name) + N'.ToString() ELSE N''SRID='' + CAST('
+                              + QUOTENAME(sc.name) + N'.STSrid AS NVARCHAR(11)) + N'';'' + ' + QUOTENAME(sc.name)
+                              + N'.ToString() END AS ' + QUOTENAME(sc.name)
+                         WHEN sc.system_type_id = 240
                          THEN QUOTENAME(sc.name) + N'.ToString() AS ' + QUOTENAME(sc.name)
                          ELSE QUOTENAME(sc.name)
                     END

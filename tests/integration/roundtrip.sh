@@ -214,12 +214,22 @@ case "${1:-}" in
 
     json)
         create_target_db BcpJsonJson
-        bcpjson import "${TARGET[@]}" --target-database BcpJsonJson --file-format json --max-tasks 2 --source-path "$WORK/source-json" --source-file '*.json'
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonJson --file-format json --max-tasks 2 --source-path "$WORK/source-json" --source-file '*.json' | tee "$WORK/json-import.log"
+        # Tables with a primary key load with an order hint (the manifest records the export's sort key); a wrong hint fails the load.
+        grep -q "rt.OrderedKey: Rows are in clustered index order" "$WORK/json-import.log" || { echo "::error::rt.OrderedKey was loaded without an order hint"; exit 1; }
+        if grep -q "plain.Spatial: Rows are in clustered index order" "$WORK/json-import.log"; then echo "::error::Staged CLR table got an order hint"; exit 1; fi
         # Documented behaviour: bulk loads don't check constraints, so SQL Server marks the target's foreign keys untrusted.
         echo "After import: $(sql -d BcpJsonJson -h -1 -W -Q "SET NOCOUNT ON; SELECT CONCAT(SUM(CAST(is_not_trusted AS INT)), ' of ', COUNT(*)) FROM sys.foreign_keys;" | tr -d '\r') foreign keys are not trusted."
         compare_decimals BcpJsonJson
         export_json BcpJsonJson "$WORK/json-roundtrip"
         compare_exact "$WORK/source-json" "$WORK/json-roundtrip"
+        grep -q '"Geo":"SRID=4269;POINT (-77.03 38.89)"' "$WORK/source-json/plain.Spatial.json" || { echo "::error::SRID 4269 not exported"; cat "$WORK/source-json/plain.Spatial.json"; exit 1; }
+
+        # A target clustered on other columns gets no hint and still loads.
+        sql -d BcpJsonJson -Q "SELECT TOP (0) * INTO rt.OtherOrder FROM rt.OrderedKey; CREATE CLUSTERED INDEX CX_OtherOrder ON rt.OtherOrder (Seq);"
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonJson --file-format json --source-path "$WORK/source-json" --source-file rt.OrderedKey.json --target-table rt.OtherOrder | tee "$WORK/json-other-order.log"
+        if grep -q "Rows are in clustered index order" "$WORK/json-other-order.log"; then echo "::error::Order hint on a different clustered key"; exit 1; fi
+        [ "$(sql -d BcpJsonJson -h -1 -W -Q "SET NOCOUNT ON; SELECT COUNT(*) FROM rt.OtherOrder;" | tr -d '[:space:]')" = "7" ] || { echo "::error::rt.OtherOrder rows"; exit 1; }
         ;;
 
     bcp)

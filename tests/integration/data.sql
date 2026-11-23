@@ -94,13 +94,19 @@ VALUES (6, 79228162514264337593543950336, 12345.6789000000, 0, 0, 0);
 INSERT plain.Decimals (Id, Whole, Mixed, Half, Fraction, Small)
 VALUES (7, 0, -0.5000000000, 42.5, -0.5, -12.34);
 
+-- Case-sensitive order: a, A, b, B (Latin1_General_CS_AS), not the binary order A, B, a, b.
+INSERT rt.OrderedKey (Code, Seq, Note)
+VALUES ('b', 1, N'b1'), ('B', 2, N'B2'), ('a', 1, N'a1'), ('a', 3, N'a3'), ('A', 1, N'A1'), ('_x', 7, NULL), ('Z', 2, N'Z2');
+
 -- Identity values with gaps must be preserved.
 INSERT plain.IdentityGaps (Name) VALUES ('a'), ('b'), ('c'), ('d'), ('e');
 DELETE plain.IdentityGaps WHERE Id IN (1005, 1015);
 
--- CLR types. geography/geometry use the SRIDs that ::Parse() assumes (4326 / 0); other SRIDs are a known JSON limitation.
+-- CLR types. Rows 2-3 use the SRIDs that ::Parse() assumes (4326 / 0); rows 4-5 use others, which JSON writes as SRID=n;WKT.
 INSERT plain.Spatial (Id, Geo, Geom, Node)
 VALUES (1, NULL, NULL, NULL),
+       (4, geography::STGeomFromText('POINT(-77.03 38.89)', 4269), geometry::STGeomFromText('POINT(530000 180000)', 27700), NULL),
+       (5, geography::STGeomFromText('POINT(-0.12 51.5 10 2)', 4258), geometry::STGeomFromText('LINESTRING(0 0 1, 1 1 2)', 3857), hierarchyid::Parse('/2/')),
        (2, geography::STGeomFromText('POINT(-122.35 47.65)', 4326), geometry::STGeomFromText('POINT(1 2)', 0), hierarchyid::Parse('/')),
        (3, geography::STGeomFromText('LINESTRING(-122.36 47.656, -122.343 47.656)', 4326),
            geometry::STGeomFromText('POLYGON((0 0, 3 0, 3 3, 0 3, 0 0))', 0), hierarchyid::Parse('/1/2.5/3/'));
