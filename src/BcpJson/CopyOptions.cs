@@ -81,6 +81,11 @@ namespace bcpJson
         [Option("snapshot", Default = false, Required = false, HelpText = "Copy from a database snapshot of the source so every table reflects the same point in time. Needs CREATE DATABASE permission and SQL Server 2016 SP1+ (any edition); the snapshot is dropped afterwards.")]
         public bool Snapshot { get; set; }
 
+        [Option("split-tables", Separator = ',', Required = false, HelpText = "Split tables into key ranges copied in parallel: schema.table[:parts], * wildcard, parts 2-200 (default 8).")]
+        public IEnumerable<string> SplitTables { get; set; }
+
+        public List<SplitRequest> SplitRequests { get; private set; } = new List<SplitRequest>();
+
         [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries when opening a connection fails transiently (network error, failover, throttling), with exponential backoff. Copies themselves are not retried. 0 = no retries.")]
         public int Retries { get; set; }
 
@@ -121,6 +126,20 @@ namespace bcpJson
             if (this.ForeignKeys && !this.Snapshot)
             {
                 Program.PostToConsole("--foreign-keys without --snapshot: if the source changes during the copy, a child row can be copied without its parent and the foreign key check will fail. Consider adding --snapshot.", Program.InfoLevel.Warning);
+            }
+
+            if (!SplitRequest.TryParse(this.SplitTables, out List<SplitRequest> splitRequests, out string splitError))
+            {
+                Program.PostToConsole(splitError, Program.InfoLevel.Error);
+                return false;
+            }
+
+            this.SplitRequests = splitRequests;
+
+            string splitWarning = SplitRequest.SnapshotWarning(this.SplitRequests.Count > 0, this.Snapshot, "copy");
+            if (splitWarning != null)
+            {
+                Program.PostToConsole(splitWarning, Program.InfoLevel.Warning);
             }
 
             if (!string.IsNullOrEmpty(this.Query))

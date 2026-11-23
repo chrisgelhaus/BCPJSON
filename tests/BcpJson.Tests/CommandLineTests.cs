@@ -127,6 +127,30 @@ namespace bcpJson.Tests
             Assert.False(opts.Valid());
         }
 
+        [Fact]
+        public void Split_tables_parses_with_default_parts()
+        {
+            var opts = Parsed<ExportOptions>("export", "--split-tables", "dbo.T");
+            Assert.Equal(new[] { "dbo.T" }, opts.SplitTables);
+            Assert.True(SplitRequest.TryParse(opts.SplitTables, out var requests, out _));
+            Assert.Equal(new SplitRequest("dbo.T", 8), Assert.Single(requests));
+        }
+
+        [Fact]
+        public void Split_tables_cannot_be_combined_with_source_query()
+        {
+            // Rejected before any connection is attempted.
+            var opts = Parsed<ExportOptions>("export", "--split-tables", "dbo.T", "--source-query", "select 1");
+            Assert.False(opts.Valid());
+        }
+
+        [Fact]
+        public void Bad_split_tables_value_fails_validation()
+        {
+            var opts = Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b", "--split-tables", "dbo.T:1");
+            Assert.False(opts.Valid());
+        }
+
         [Theory]
         [InlineData(0, "--version")]
         [InlineData(0, "--help")]

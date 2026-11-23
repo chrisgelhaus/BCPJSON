@@ -60,6 +60,11 @@ namespace bcpJson
         [Option("snapshot", Default = false, Required = false, HelpText = "Export from a database snapshot of the source so every table reflects the same point in time, however long the export runs. Needs CREATE DATABASE permission and SQL Server 2016 SP1+ (any edition); the snapshot is dropped afterwards.")]
         public bool Snapshot { get; set; }
 
+        [Option("split-tables", Separator = ',', Required = false, HelpText = "Split tables into key ranges exported in parallel: schema.table[:parts], * wildcard, parts 2-200 (default 8).")]
+        public IEnumerable<string> SplitTables { get; set; }
+
+        public List<SplitRequest> SplitRequests { get; private set; } = new List<SplitRequest>();
+
         [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries after a transient failure (network error, failover, throttling), with exponential backoff. Applies to opening connections and to exporting a table, which is redone from the start. --source-query exports are not retried. 0 = no retries.")]
         public int Retries { get; set; }
 
@@ -128,6 +133,26 @@ namespace bcpJson
             {
                 Program.PostToConsole("--snapshot needs --source-database (the database to snapshot).", Program.InfoLevel.Error);
                 return false;
+            }
+
+            if (!SplitRequest.TryParse(this.SplitTables, out List<SplitRequest> splitRequests, out string splitError))
+            {
+                Program.PostToConsole(splitError, Program.InfoLevel.Error);
+                return false;
+            }
+
+            this.SplitRequests = splitRequests;
+
+            if (this.SplitRequests.Count > 0 && this.IsQueryExport)
+            {
+                Program.PostToConsole("--split-tables cannot be combined with --source-query: only table exports can be split.", Program.InfoLevel.Error);
+                return false;
+            }
+
+            string splitWarning = SplitRequest.SnapshotWarning(this.SplitRequests.Count > 0, this.Snapshot, "export");
+            if (splitWarning != null)
+            {
+                Program.PostToConsole(splitWarning, Program.InfoLevel.Warning);
             }
 
             if (string.IsNullOrEmpty(this.exportPath))
