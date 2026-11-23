@@ -39,6 +39,47 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void More_sql_types()
+        {
+            Assert.Equal("nvarchar(max)", Col("nvarchar", -1).SqlType);
+            Assert.Equal("varbinary(max)", Col("varbinary", -1).SqlType);
+            Assert.Equal("time(7)", Col("time", 5, 16, 7).SqlType);
+        }
+
+        [Fact]
+        public void Inclusive_upper_and_nulls_only()
+        {
+            var r = new KeyRange { Part = 1, Upper = "9", UpperInclusive = true };
+            Assert.Equal("([K] <= CONVERT(int, N'9'))", r.Predicate(Col("int", 4)));
+            var n = new KeyRange { Part = 1, IncludeNulls = true };
+            Assert.Equal("([K] IS NULL)", n.Predicate(Col("int", 4, nullable: true)));
+        }
+
+        [Fact]
+        public void Value_expression_styles()
+        {
+            Assert.Equal("CONVERT(binary(16), N'0xAB', 1)", KeyRange.ValueExpression(Col("binary", 16), "0xAB"));
+            Assert.Equal("CONVERT(int, N'7')", KeyRange.ValueExpression(Col("int", 4), "7"));
+        }
+
+        [Theory]
+        [InlineData("a\"b", true)]
+        [InlineData("a\\b", true)]
+        [InlineData("a\nb", true)]
+        [InlineData("a b]c", false)]
+        public void Unsafe_column_names_are_refused(string name, bool unsafeName)
+        {
+            var col = Col("int", 4);
+            col.Name = name;
+            Assert.Equal(!unsafeName, col.HasCommandLineSafeName);
+            var r = new KeyRange { Part = 2, Lower = "1", LowerInclusive = true };
+            if (unsafeName)
+                Assert.Throws<InvalidOperationException>(() => r.Predicate(col));
+            else
+                Assert.NotNull(r.Predicate(col));
+        }
+
+        [Fact]
         public void Unbounded_range_selects_everything()
         {
             Assert.Equal("1 = 1", new KeyRange { Part = 1 }.Predicate(Col("int", 4)));
@@ -49,6 +90,11 @@ namespace bcpJson.Tests
         [InlineData("O'Brien", "N'O''Brien'")]
         [InlineData("say \"hi\"", "(N'say ' + NCHAR(34) + N'hi' + NCHAR(34) + N'')")]
         [InlineData(@"C:\x", "(N'C:' + NCHAR(92) + N'x')")]
+        [InlineData("a\"\\b", "(N'a' + NCHAR(34) + N'' + NCHAR(92) + N'b')")]
+        [InlineData("\"a", "(N'' + NCHAR(34) + N'a')")]
+        [InlineData("", "N''")]
+        [InlineData("x\r\ny", "(N'x' + NCHAR(13) + N'' + NCHAR(10) + N'y')")]
+        [InlineData("a\tb", "(N'a' + NCHAR(9) + N'b')")]
         public void Text_literals_are_safe_on_a_command_line(string value, string literal)
         {
             Assert.Equal(literal, KeyRange.TextLiteral(value));

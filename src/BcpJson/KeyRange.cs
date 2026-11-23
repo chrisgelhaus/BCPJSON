@@ -23,6 +23,15 @@ namespace bcpJson
         public bool Descending { get; set; }
         public string Collation { get; set; }
 
+        /// <summary>
+        /// False when the name holds a double quote, a backslash or a control character: the name goes into a
+        /// predicate on a bcp command line, and bracket quoting cannot escape those.
+        /// </summary>
+        public bool HasCommandLineSafeName
+        {
+            get { return Name != null && !Name.Any(c => c == '"' || c == '\\' || c < 32); }
+        }
+
         /// <summary>The column type as T-SQL, for example decimal(18,4), nvarchar(30), varchar(max).</summary>
         public string SqlType
         {
@@ -98,6 +107,8 @@ namespace bcpJson
         /// <summary>WHERE predicate selecting the rows of this range.</summary>
         public string Predicate(SplitColumn column)
         {
+            if (!column.HasCommandLineSafeName)
+                throw new InvalidOperationException("Split column name contains characters bcp cannot take on its command line.");
             string name = Program.QuoteName(column.Name);
             var bounds = new List<string>();
             if (Lower != null)
@@ -111,23 +122,28 @@ namespace bcpJson
             return text.Length == 0 ? "1 = 1" : "(" + text + ")";
         }
 
+        private static bool NeedsNchar(char c)
+        {
+            return c == '"' || c == '\\' || c < 32;
+        }
+
         /// <summary>
         /// String literal that survives a command line: double quotes and backslashes are built with NCHAR()
         /// so they never appear in the SQL text.
         /// </summary>
         public static string TextLiteral(string value)
         {
-            if (value.IndexOf('"') < 0 && value.IndexOf('\\') < 0)
+            if (!value.Any(NeedsNchar))
                 return Program.SqlLiteral(value);
 
             var parts = new List<string>();
             var current = new System.Text.StringBuilder();
             foreach (char c in value)
             {
-                if (c == '"' || c == '\\')
+                if (NeedsNchar(c))
                 {
                     parts.Add(Program.SqlLiteral(current.ToString()));
-                    parts.Add("NCHAR(" + (c == '"' ? "34" : "92") + ")");
+                    parts.Add("NCHAR(" + ((int)c).ToString(CultureInfo.InvariantCulture) + ")");
                     current.Clear();
                 }
                 else
