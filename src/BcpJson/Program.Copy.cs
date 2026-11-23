@@ -486,6 +486,17 @@ WHERE s.name = @schema AND t.name = @table;";
 
                 targetTable.Columns.Add(column);
             }
+
+            // A partitioned source lands on the same partition scheme when the target has one of that name: indexes are
+            // scripted with their scheme, and a clustered columnstore index must be aligned with its table.
+            if (sourceTable.IsPartitioned && targetDatabase.PartitionSchemes.Contains(sourceTable.PartitionScheme))
+            {
+                targetTable.PartitionScheme = sourceTable.PartitionScheme;
+                foreach (PartitionSchemeParameter parameter in sourceTable.PartitionSchemeParameters)
+                {
+                    targetTable.PartitionSchemeParameters.Add(new PartitionSchemeParameter(targetTable, parameter.Name));
+                }
+            }
             targetTable.Create();
             created = true;
             PostToConsole(string.Format("{0}: Target table created.", label), InfoLevel.Info);
