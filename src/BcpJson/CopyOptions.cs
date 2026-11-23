@@ -99,6 +99,18 @@ namespace bcpJson
             return SqlConnectionFactory.Build(this.TargetSQLServer, this.TargetSQLDatabase, this.TargetSQLLogin, this.TargetSQLPassword, false, this.TrustServerCertificate);
         }
 
+        /// <summary>Parses --split-tables into SplitRequests. Returns the error (or null) and the snapshot warning (or null). No connection is made.</summary>
+        internal (string Error, string Warning) ValidateSplit()
+        {
+            if (!SplitRequest.TryParse(this.SplitTables, out List<SplitRequest> requests, out string error))
+            {
+                return (error, null);
+            }
+
+            this.SplitRequests = requests;
+            return (null, SplitRequest.SnapshotWarning(requests.Count > 0, this.Snapshot, "copy"));
+        }
+
         public bool Valid()
         {
             this.IncludeTablesList ??= new List<string>();
@@ -128,15 +140,13 @@ namespace bcpJson
                 Program.PostToConsole("--foreign-keys without --snapshot: if the source changes during the copy, a child row can be copied without its parent and the foreign key check will fail. Consider adding --snapshot.", Program.InfoLevel.Warning);
             }
 
-            if (!SplitRequest.TryParse(this.SplitTables, out List<SplitRequest> splitRequests, out string splitError))
+            (string splitError, string splitWarning) = this.ValidateSplit();
+            if (splitError != null)
             {
                 Program.PostToConsole(splitError, Program.InfoLevel.Error);
                 return false;
             }
 
-            this.SplitRequests = splitRequests;
-
-            string splitWarning = SplitRequest.SnapshotWarning(this.SplitRequests.Count > 0, this.Snapshot, "copy");
             if (splitWarning != null)
             {
                 Program.PostToConsole(splitWarning, Program.InfoLevel.Warning);

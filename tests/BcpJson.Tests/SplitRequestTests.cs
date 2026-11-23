@@ -18,6 +18,7 @@ namespace bcpJson.Tests
         [InlineData("dbo.T:201")]
         [InlineData("dbo.T:0")]
         [InlineData(":4")]
+        [InlineData("dbo.T:")]
         [InlineData("")]
         public void Rejects_bad_values(string value)
         {

@@ -31,7 +31,7 @@ namespace bcpJson
                     }
                 }
 
-                if (pattern.Length == 0)
+                if (pattern.Length == 0 || value.EndsWith(":"))
                 {
                     error = string.Format("--split-tables: '{0}' has no table name. Use schema.table[:parts].", raw);
                     return false;

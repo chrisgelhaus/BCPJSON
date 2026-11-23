@@ -136,19 +136,54 @@ namespace bcpJson.Tests
             Assert.Equal(new SplitRequest("dbo.T", 8), Assert.Single(requests));
         }
 
+        private const string ExportWarning = "--split-tables without --snapshot: the parts of a table are read at different moments. Use --snapshot for an exact, consistent export.";
+        private const string CopyWarning = "--split-tables without --snapshot: the parts of a table are read at different moments. Use --snapshot for an exact, consistent copy.";
+
         [Fact]
         public void Split_tables_cannot_be_combined_with_source_query()
         {
-            // Rejected before any connection is attempted.
             var opts = Parsed<ExportOptions>("export", "--split-tables", "dbo.T", "--source-query", "select 1");
-            Assert.False(opts.Valid());
+            Assert.Contains("--split-tables", opts.ValidateSplit().Error);
+            Assert.False(opts.Valid());   // rejected before any connection is attempted
         }
 
         [Fact]
-        public void Bad_split_tables_value_fails_validation()
+        public void Bad_split_tables_value_is_an_error_for_export_and_copy()
         {
-            var opts = Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b", "--split-tables", "dbo.T:1");
-            Assert.False(opts.Valid());
+            var export = Parsed<ExportOptions>("export", "--split-tables", "dbo.T:1");
+            Assert.Contains("--split-tables", export.ValidateSplit().Error);
+            var copy = Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b", "--split-tables", "dbo.T:1");
+            Assert.Contains("--split-tables", copy.ValidateSplit().Error);
+            Assert.False(copy.Valid());
+        }
+
+        [Fact]
+        public void Export_warns_without_snapshot_and_fills_requests()
+        {
+            var opts = Parsed<ExportOptions>("export", "--split-tables", "dbo.T");
+            var (error, warning) = opts.ValidateSplit();
+            Assert.Null(error);
+            Assert.Equal(ExportWarning, warning);
+            Assert.Equal(new SplitRequest("dbo.T", 8), Assert.Single(opts.SplitRequests));
+        }
+
+        [Fact]
+        public void Copy_warns_without_snapshot_and_fills_requests()
+        {
+            var opts = Parsed<CopyOptions>("copy", "--split-tables", "dbo.T:4");
+            var (error, warning) = opts.ValidateSplit();
+            Assert.Null(error);
+            Assert.Equal(CopyWarning, warning);
+            Assert.Equal(new SplitRequest("dbo.T", 4), Assert.Single(opts.SplitRequests));
+        }
+
+        [Fact]
+        public void No_split_warning_with_snapshot_or_without_split()
+        {
+            Assert.Null(Parsed<ExportOptions>("export", "--split-tables", "dbo.T", "--snapshot").ValidateSplit().Warning);
+            Assert.Null(Parsed<CopyOptions>("copy", "--split-tables", "dbo.T", "--snapshot").ValidateSplit().Warning);
+            Assert.Null(Parsed<ExportOptions>("export").ValidateSplit().Warning);
+            Assert.Null(Parsed<CopyOptions>("copy").ValidateSplit().Warning);
         }
 
         [Theory]

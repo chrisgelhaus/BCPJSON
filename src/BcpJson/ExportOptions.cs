@@ -99,6 +99,24 @@ namespace bcpJson
             return SqlConnectionFactory.Build(this.srcServer, this.srcDatabase, this.srcLogin, this.srcPassword, true, this.TrustServerCertificate);
         }
 
+        /// <summary>Parses --split-tables into SplitRequests. Returns the error (or null) and the snapshot warning (or null). No connection is made.</summary>
+        internal (string Error, string Warning) ValidateSplit()
+        {
+            if (!SplitRequest.TryParse(this.SplitTables, out List<SplitRequest> requests, out string error))
+            {
+                return (error, null);
+            }
+
+            this.SplitRequests = requests;
+
+            if (requests.Count > 0 && this.IsQueryExport)
+            {
+                return ("--split-tables cannot be combined with --source-query: only table exports can be split.", null);
+            }
+
+            return (null, SplitRequest.SnapshotWarning(requests.Count > 0, this.Snapshot, "export"));
+        }
+
         public bool Valid()
         {
             this.IncludeTablesList ??= new List<string>();
@@ -135,21 +153,13 @@ namespace bcpJson
                 return false;
             }
 
-            if (!SplitRequest.TryParse(this.SplitTables, out List<SplitRequest> splitRequests, out string splitError))
+            (string splitError, string splitWarning) = this.ValidateSplit();
+            if (splitError != null)
             {
                 Program.PostToConsole(splitError, Program.InfoLevel.Error);
                 return false;
             }
 
-            this.SplitRequests = splitRequests;
-
-            if (this.SplitRequests.Count > 0 && this.IsQueryExport)
-            {
-                Program.PostToConsole("--split-tables cannot be combined with --source-query: only table exports can be split.", Program.InfoLevel.Error);
-                return false;
-            }
-
-            string splitWarning = SplitRequest.SnapshotWarning(this.SplitRequests.Count > 0, this.Snapshot, "export");
             if (splitWarning != null)
             {
                 Program.PostToConsole(splitWarning, Program.InfoLevel.Warning);
