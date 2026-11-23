@@ -3,9 +3,6 @@ name: Benchmark
 # Manual only: measures split exports and the load options for one large table (see tests/integration/benchmark.sh).
 # It is not a required check and never runs on push or pull requests.
 on:
-  push:
-    branches: [feature/split-tables]
-    paths: [.github/workflows/benchmark.yml, tests/integration/benchmark.sh]
   workflow_dispatch:
     inputs:
       rows:
@@ -68,5 +65,5 @@ jobs:
 
       - name: Benchmark
         env:
-          ROWS: ${{ inputs.rows || '1000000' }}
+          ROWS: ${{ inputs.rows }}
         run: bash tests/integration/benchmark.sh "$ROWS"
