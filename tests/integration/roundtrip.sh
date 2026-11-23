@@ -18,7 +18,8 @@
 #   roundtrip.sh split     CONVERT styles of split boundaries; export --split-tables (JSON from a snapshot, BCP): part
 #                          counts, verify, joined parts equal the unsplit export; --resume redoes a missing part;
 #                          import of the parts (load modes, --disable-indexes and a failing unique rebuild, another
-#                          clustered key, BCP parts, truncate once per table)
+#                          clustered key, BCP parts, truncate once per table); copy --split-tables (parallel parts
+#                          into new tables, one after another into clustered targets, CLR tables unsplit)
 #
 # Table locking: JSON import and copy use the default (TABLOCK); BCP import uses --no-table-lock.
 #
@@ -681,6 +682,34 @@ case "${1:-}" in
         for t in Big Text Descending Parted; do cp "$src/split.$t.json" "$sbs/"; done
         export_json BcpJsonSplitBcp "$WORK/split-import-bcp" --include-tables split.Big,split.Text,split.Descending,split.Parted
         compare_exact "$sbs" "$WORK/split-import-bcp"
+
+        # 6. Copy: each part is its own source-to-target stream. Created targets are heaps until the load ends, so the
+        #    parts load in parallel and the indexes are built afterwards.
+        create_empty_db BcpJsonSplitCopy
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy --max-tasks 4 \
+            --include-schemas split --split-tables "split.*:4" --snapshot | tee "$WORK/split-copy.log"
+        assert_no_snapshots
+        grep -qF "split.Big: 4 parts, loading in parallel." "$WORK/split-copy.log" || { echo "::error::split.Big was not copied in parallel parts"; exit 1; }
+        [ "$(scalar BcpJsonSplitCopy "SELECT COUNT(*) FROM sys.indexes WHERE name = N'IX_Big_Stamp' AND object_id = OBJECT_ID(N'split.Big');")" = "1" ] \
+            || { echo "::error::IX_Big_Stamp was not created after the split copy"; exit 1; }
+        export_json BcpJsonSplitCopy "$WORK/split-copy" --include-schemas split
+        compare_exact "$sjs" "$WORK/split-copy"
+
+        # Into the existing tables with --truncate-target: split.Big now has its clustered primary key, so its parts
+        # load one after another.
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy --max-tasks 4 \
+            --include-schemas split --split-tables "split.*:4" --snapshot --truncate-target | tee "$WORK/split-copy-truncate.log"
+        grep -qF "split.Big: 4 parts, loading one after another (clustered index)." "$WORK/split-copy-truncate.log" \
+            || { echo "::error::split.Big was not copied one part after another into its clustered target"; exit 1; }
+        export_json BcpJsonSplitCopy "$WORK/split-copy-truncate" --include-schemas split
+        compare_exact "$sjs" "$WORK/split-copy-truncate"
+
+        # A table copied through bcp (CLR types) is never split.
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy \
+            --include-tables plain.Spatial --split-tables "plain.*:2" | tee "$WORK/split-copy-clr.log"
+        grep -qF "plain.Spatial: not split: copied through bcp (geography/geometry/hierarchyid columns)." "$WORK/split-copy-clr.log" \
+            || { echo "::error::plain.Spatial was not reported as not split"; exit 1; }
+        echo "Split copy: parallel parts into new heaps, one after another into clustered targets, CLR tables unsplit."
         ;;
 
     *)
