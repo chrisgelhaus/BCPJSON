@@ -131,7 +131,81 @@ namespace bcpJson
         public bool IsIntact(string name, string folder, bool checkHash)
         {
             ManifestTable table = this.Find(name);
-            return table != null && table.Files.Count > 0 && table.Files.All(f => f.Problem(folder, checkHash) == null);
+            if (table == null || table.Files.Count == 0)
+            {
+                return false;
+            }
+            if (table.Split != null && (table.Split.PartCount <= 0 || table.Split.Parts.Count < table.Split.PartCount))
+            {
+                return false;
+            }
+            return table.Files.All(f => f.Problem(folder, checkHash) == null);
+        }
+
+        /// <summary>
+        /// Adds one finished part of a split table (thread-safe: parts arrive from parallel workers) and saves the manifest.
+        /// <paramref name="shell"/> is the table entry to start from (name, split description, shared files such as the
+        /// BCP format file); an existing entry is kept and updated instead.
+        /// </summary>
+        public void RecordPart(ManifestTable shell, ManifestPart part, IList<ManifestFile> partFiles, string folder)
+        {
+            lock (this.sync)
+            {
+                ManifestTable table = this.Tables.FirstOrDefault(t => string.Equals(t.Name, shell.Name, StringComparison.Ordinal));
+                if (table == null)
+                {
+                    table = shell;
+                    table.Split.Parts ??= new List<ManifestPart>();
+                    this.Tables.Add(table);
+                }
+                table.Split.Parts.RemoveAll(p => p.Part == part.Part);
+                table.Split.Parts.Add(part);
+                table.Split.Parts.Sort((a, b) => a.Part.CompareTo(b.Part));
+
+                foreach (ManifestFile file in partFiles.Concat(shell.Files).ToList())
+                {
+                    table.Files.RemoveAll(f => string.Equals(f.Name, file.Name, StringComparison.Ordinal));
+                    table.Files.Add(file);
+                }
+                table.Files.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+
+                table.Rows = table.Split.Parts.Any(p => p.Rows < 0) ? -1 : table.Split.Parts.Sum(p => p.Rows);
+                table.OrderedBy = shell.OrderedBy;
+                table.Exported = DateTime.UtcNow;
+                this.Tables.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
+                this.Save(folder);
+            }
+        }
+
+        /// <summary>
+        /// Numbers (1..PartCount) of the parts of a split table that are not recorded, or whose files are missing or
+        /// have a different size. Empty for a table that is not split or not in the manifest.
+        /// </summary>
+        public List<int> PartsToRedo(string name, string folder)
+        {
+            var redo = new List<int>();
+            lock (this.sync)
+            {
+                ManifestTable table = this.Find(name);
+                if (table?.Split == null)
+                {
+                    return redo;
+                }
+                for (int number = 1; number <= table.Split.PartCount; number++)
+                {
+                    ManifestPart part = table.Split.Parts.FirstOrDefault(p => p.Part == number);
+                    bool intact = part != null && part.Files.Count > 0 && part.Files.All(fileName =>
+                    {
+                        ManifestFile file = table.Files.FirstOrDefault(f => string.Equals(f.Name, fileName, StringComparison.Ordinal));
+                        return file != null && file.Problem(folder, false) == null;
+                    });
+                    if (!intact)
+                    {
+                        redo.Add(number);
+                    }
+                }
+            }
+            return redo;
         }
     }
 
@@ -152,6 +226,71 @@ namespace bcpJson
         /// </summary>
         [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
         public List<ManifestKeyColumn> OrderedBy { get; set; }
+
+        /// <summary>Set when the table was exported in key-range parts (--split-tables); left out of the file otherwise.</summary>
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public ManifestSplit Split { get; set; }
+    }
+
+    /// <summary>How a table was split: the key column, where the boundaries came from and the parts recorded so far.</summary>
+    internal sealed class ManifestSplit
+    {
+        /// <summary>histogram or partition.</summary>
+        public string Kind { get; set; }
+        public string Column { get; set; }
+        public string Type { get; set; }
+        public bool Descending { get; set; }
+        public bool Nullable { get; set; }
+
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public string PartitionFunction { get; set; }
+
+        [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
+        public bool? RangeRight { get; set; }
+
+        public int PartCount { get; set; }
+        public List<ManifestPart> Parts { get; set; } = new List<ManifestPart>();
+    }
+
+    /// <summary>One key range of a split table, with the rows and files exported for it.</summary>
+    internal sealed class ManifestPart
+    {
+        public int Part { get; set; }
+        public long Rows { get; set; }
+        public List<string> Files { get; set; } = new List<string>();
+        public string Lower { get; set; }
+        public bool LowerInclusive { get; set; }
+        public string Upper { get; set; }
+        public bool UpperInclusive { get; set; }
+        public bool IncludeNulls { get; set; }
+
+        public KeyRange ToRange()
+        {
+            return new KeyRange
+            {
+                Part = this.Part,
+                Lower = this.Lower,
+                LowerInclusive = this.LowerInclusive,
+                Upper = this.Upper,
+                UpperInclusive = this.UpperInclusive,
+                IncludeNulls = this.IncludeNulls
+            };
+        }
+
+        public static ManifestPart From(KeyRange range, long rows, IEnumerable<string> files)
+        {
+            return new ManifestPart
+            {
+                Part = range.Part,
+                Rows = rows,
+                Files = files.ToList(),
+                Lower = range.Lower,
+                LowerInclusive = range.LowerInclusive,
+                Upper = range.Upper,
+                UpperInclusive = range.UpperInclusive,
+                IncludeNulls = range.IncludeNulls
+            };
+        }
     }
 
     /// <summary>One key column: name, system type, direction and collation (null for non-string types).</summary>

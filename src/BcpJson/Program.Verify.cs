@@ -26,6 +26,10 @@ namespace bcpJson
 
             foreach (ManifestTable table in manifest.Tables)
             {
+                if (table.Split != null && table.Split.Parts.Count < table.Split.PartCount)
+                {
+                    problems.Add(string.Format("{0}: {1} of {2} parts exported.", table.Name, table.Split.Parts.Count, table.Split.PartCount));
+                }
                 foreach (ManifestFile file in table.Files)
                 {
                     files++;
