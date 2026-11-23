@@ -15,6 +15,8 @@
 #                          connection retry while the database comes online
 #   roundtrip.sh compression  export --compress gzip (JSON and BCP) -> verify -> import the .gz files (small and
 #                          single-transaction batches) -> export JSON, diff with the source export; --resume rules
+#   roundtrip.sh split     CONVERT styles of split boundaries; export --split-tables (JSON from a snapshot, BCP): part
+#                          counts, verify, joined parts equal the unsplit export; --resume redoes a missing part
 #
 # Table locking: JSON import and copy use the default (TABLOCK); BCP import uses --no-table-lock.
 #
@@ -141,7 +143,7 @@ compare_decimals() {
 create_empty_db() {
     local db="$1"
     sql -Q "IF DB_ID(N'$db') IS NOT NULL BEGIN ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db]; END; CREATE DATABASE [$db];"
-    sql -d "$db" -Q "EXEC (N'CREATE SCHEMA rt'); EXEC (N'CREATE SCHEMA plain');"
+    sql -d "$db" -Q "EXEC (N'CREATE SCHEMA rt'); EXEC (N'CREATE SCHEMA plain'); EXEC (N'CREATE SCHEMA split');"
 }
 
 # Object definitions compared between source and copy; each has a <kind>.sql returning one line per object.
@@ -185,6 +187,22 @@ assert_gzip_export() {
     done
     [ "$(jq -r '.compression' "$dir/$MANIFEST")" = "gzip" ] || { echo "::error::Manifest does not record gzip"; return 1; }
     echo "$count valid $ext.gz files."
+}
+
+# Number of part files <table>.partNNNN.<ext> in a folder.
+part_count() {
+    local dir="$1" table="$2" ext="$3"
+    ls "$dir" | grep -c "^$table\.part[0-9][0-9][0-9][0-9]\.$ext\$" || true
+}
+
+# The JSON parts of a split table joined into one array, as the unsplit export writes it: each part's "]" line is
+# dropped, a following part's leading "[" becomes ",", and empty parts ("[]") are skipped.
+join_parts() {
+    local dir="$1" table="$2"
+    LC_ALL=C awk 'FNR == 1 && $0 == "[]" { next }
+                  $0 == "]" { next }
+                  { printf "%s%s", (rows++ ? "\n," : "["), substr($0, 2) }
+                  END { printf "%s", (rows ? "\n]" : "[]") }' "$dir/$table".part[0-9][0-9][0-9][0-9].json
 }
 
 create_target_db() {
@@ -466,8 +484,79 @@ case "${1:-}" in
         cmp <(zcat "$gz/plain.Ref.json.gz") <(zcat "$res/plain.Ref.json.gz") || { echo "::error::Resumed plain.Ref differs"; exit 1; }
         ;;
 
+    split)
+        command -v jq >/dev/null || { echo "jq not found on PATH"; exit 1; }
+        src="$WORK/source-json"
+
+        # 1. Boundaries travel as text through CONVERT styles; each split column type must round-trip exactly.
+        sql -d BcpJsonSource -i "$HERE/convert_styles.sql"
+
+        # 2. JSON, every split table cut into 8 parts where it can be, from a snapshot.
+        sj="$WORK/split-json"
+        export_json BcpJsonSource "$sj" --include-schemas split --split-tables "split.*:8" --snapshot | tee "$WORK/split-json.log"
+        assert_no_snapshots
+        ls -l "$sj"
+        for t in Big NullKey Descending; do
+            n="$(part_count "$sj" "split.$t" json)"
+            [ "$n" = "8" ] || { echo "::error::split.$t has $n part files, expected 8"; exit 1; }
+        done
+        for t in Text Parted PartedHeap PartedCci; do
+            n="$(part_count "$sj" "split.$t" json)"
+            [ "$n" -ge 2 ] || { echo "::error::split.$t has $n part files, expected at least 2"; exit 1; }
+        done
+        [ -f "$sj/split.Heap.json" ] && [ "$(part_count "$sj" split.Heap json)" = "0" ] || { echo "::error::split.Heap was not exported as one file"; exit 1; }
+        grep -q "split.Heap: not split:" "$WORK/split-json.log" || { echo "::error::No 'not split' warning for split.Heap"; exit 1; }
+        bcpjson verify --path "$sj"
+        jq -e 'all(.tables[] | select(.split != null); .split.partCount == (.split.parts | length))' "$sj/$MANIFEST" > /dev/null \
+            || { echo "::error::A split table's manifest entry does not list all its parts"; cat "$sj/$MANIFEST"; exit 1; }
+        # Row counts per table match the unsplit export's manifest: no row lost or read twice.
+        diff <(jq -r '.tables[] | select(.name | startswith("split.")) | "\(.name) \(.rows)"' "$src/$MANIFEST") \
+             <(jq -r '.tables[] | "\(.name) \(.rows)"' "$sj/$MANIFEST") || { echo "::error::Split export row counts differ"; exit 1; }
+
+        # The parts joined in order equal the unsplit export where the split column leads the primary key (or the
+        # sort order); partitioned tables are split on Stamp but sorted by Id, so only their rows are compared.
+        joined="$WORK/split-joined"
+        rm -rf "$joined"
+        mkdir -p "$joined"
+        for t in Big Text NullKey Descending; do
+            join_parts "$sj" "split.$t" > "$joined/split.$t.json"
+            cmp "$joined/split.$t.json" "$src/split.$t.json" || { echo "::error::Joined parts of split.$t differ from the unsplit export"; exit 1; }
+        done
+        for t in Parted PartedHeap PartedCci; do
+            join_parts "$sj" "split.$t" > "$joined/split.$t.json"
+            diff <(normalize_rows "$joined/split.$t.json" | grep -v '^$') <(normalize_rows "$src/split.$t.json" | grep -v '^$') > /dev/null \
+                || { echo "::error::The parts of split.$t do not hold the rows of the unsplit export"; exit 1; }
+        done
+        echo "Joined parts equal the unsplit export (Big, Text, NullKey, Descending; Parted* ignoring order)."
+
+        # 3. BCP: queryout per part with the boundaries as typed literals, one shared format file.
+        sb="$WORK/split-bcp"
+        rm -rf "$sb"
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format bcp --export-path "$sb" \
+            --include-tables split.Big,split.Text,split.Descending,split.Parted --split-tables "split.*:4" | tee "$WORK/split-bcp.log"
+        ls -l "$sb"
+        [ "$(part_count "$sb" split.Big bcp)" = "4" ] || { echo "::error::split.Big has no 4 BCP parts"; exit 1; }
+        [ -f "$sb/split.Big-c.fmt" ] || { echo "::error::split.Big has no format file"; exit 1; }
+        bcpjson verify --path "$sb"
+        diff <(jq -r '.tables[] | select(.name == "split.Big" or .name == "split.Text" or .name == "split.Descending" or .name == "split.Parted") | "\(.name) \(.rows)"' "$src/$MANIFEST") \
+             <(jq -r '.tables[] | "\(.name) \(.rows)"' "$sb/$MANIFEST") || { echo "::error::Split BCP export row counts differ"; exit 1; }
+
+        # 4. --resume after losing one part, without --split-tables: the recorded split is kept and only that part redone.
+        res="$WORK/split-resume"
+        rm -rf "$res"
+        cp -r "$sj" "$res"
+        rm "$res/split.Big.part0003.json"
+        jq '.completed = null | .tables |= map(if .name == "split.Big" then (.split.parts |= map(select(.part != 3)) | .files |= map(select(.name != "split.Big.part0003.json"))) else . end)' \
+            "$sj/$MANIFEST" > "$res/$MANIFEST"
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format json --include-schemas split --export-path "$res" --resume | tee "$WORK/split-resume.log"
+        grep -qF "split.Big: --resume keeps its recorded split (8 parts)." "$WORK/split-resume.log" || { echo "::error::--resume did not keep the recorded split"; exit 1; }
+        grep -qF "split.Big: 1 part(s) to go." "$WORK/split-resume.log" || { echo "::error::--resume did not redo exactly one part"; exit 1; }
+        cmp "$sj/split.Big.part0003.json" "$res/split.Big.part0003.json" || { echo "::error::The redone part differs"; exit 1; }
+        bcpjson verify --path "$res"
+        ;;
+
     *)
-        echo "usage: $0 setup|json|bcp|copy|snapshot|consistency|resilience|compression" >&2
+        echo "usage: $0 setup|json|bcp|copy|snapshot|consistency|resilience|compression|split" >&2
         exit 2
         ;;
 esac

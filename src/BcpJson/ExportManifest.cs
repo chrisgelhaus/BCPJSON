@@ -249,6 +249,13 @@ namespace bcpJson
         public bool? RangeRight { get; set; }
 
         public int PartCount { get; set; }
+
+        /// <summary>
+        /// The PartCount - 1 values the key is cut at, ascending (as text, see <see cref="KeyRange"/>). --resume rebuilds the
+        /// ranges of parts that were never recorded from these.
+        /// </summary>
+        public List<string> Boundaries { get; set; } = new List<string>();
+
         public List<ManifestPart> Parts { get; set; } = new List<ManifestPart>();
     }
 

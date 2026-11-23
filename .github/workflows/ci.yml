@@ -142,6 +142,10 @@ jobs:
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: bash tests/integration/roundtrip.sh compression
 
+      - name: Split tables (key ranges and partitions)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: bash tests/integration/roundtrip.sh split
+
       - name: Upload exported files
         if: failure()
         uses: actions/upload-artifact@v7

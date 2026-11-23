@@ -117,3 +117,85 @@ INSERT rt.Child (Id, ParentId, ParentCode, A, B, ManagerId)
 VALUES (1, 1, 'AAA', 1, 1, NULL), (2, 2, 'BBB', 1, 2, 1), (3, NULL, NULL, NULL, NULL, 2), (4, 3, 'CCC', 2, 1, 1);
 INSERT plain.Ref (Id, ChildId, LooseChildId, OffChildId) VALUES (1, 1, 2, 99), (2, NULL, NULL, NULL), (3, 4, 4, 3);
 GO
+
+/* Schema split (--split-tables). */
+SET NOCOUNT ON;
+
+WITH n AS
+(
+    SELECT TOP (200000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i
+    FROM sys.all_objects a CROSS JOIN sys.all_objects b
+)
+INSERT split.Big (Id, Stamp, Code, Amount, Note)
+SELECT i,
+       DATEADD(SECOND, i, CAST('2026-01-01T00:00:00.1234567' AS DATETIME2(7))),
+       CONCAT('C', i),
+       i * 1.2345,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE CONCAT(N'note ', i) END
+FROM n;
+
+-- 2,992 generated keys, each ending in a double quote, a backslash or an apostrophe, so every boundary has one.
+WITH n AS
+(
+    SELECT TOP (2992) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i
+    FROM sys.all_objects a CROSS JOIN sys.all_objects b
+)
+INSERT split.Text (Code, Seq)
+SELECT CONCAT('q', RIGHT(CONCAT('0000', i), 4), CASE i % 3 WHEN 0 THEN '"' WHEN 1 THEN '\' ELSE '''' END), i
+FROM n;
+INSERT split.Text (Code, Seq)
+VALUES ('O''Brien', 3001), ('say "hi"', 3002), ('C:\x', 3003), ('Zo' + CHAR(235), 3004),
+       ('a', 3005), ('A', 3006), ('b', 3007), ('B', 3008);
+
+WITH n AS
+(
+    SELECT TOP (20000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i
+    FROM sys.all_objects a CROSS JOIN sys.all_objects b
+)
+INSERT split.NullKey (K, Id)
+SELECT CASE WHEN i % 10 = 0 THEN NULL ELSE i END, i
+FROM n;
+
+WITH n AS
+(
+    SELECT TOP (20000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i
+    FROM sys.all_objects a CROSS JOIN sys.all_objects b
+)
+INSERT split.Descending (Id, Val)
+SELECT i, i % 100
+FROM n;
+
+-- 30,000 rows every 7 minutes from 2026-01-01 (until late May): partitions before January and from June stay empty.
+WITH n AS
+(
+    SELECT TOP (30000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i
+    FROM sys.all_objects a CROSS JOIN sys.all_objects b
+)
+SELECT i AS Id, DATEADD(MINUTE, (i - 1) * 7, CAST('2026-01-01' AS DATETIME2(7))) AS Stamp, i % 1000 AS Val
+INTO #parted
+FROM n;
+INSERT split.Parted (Id, Stamp, Val) SELECT Id, Stamp, Val FROM #parted;
+INSERT split.PartedHeap (Id, Stamp, Val) SELECT Id, CASE WHEN Id % 1000 = 0 THEN NULL ELSE Stamp END, Val FROM #parted;
+INSERT split.PartedCci (Id, Stamp, Val) SELECT Id, Stamp, Val FROM #parted;
+DROP TABLE #parted;
+
+WITH n AS
+(
+    SELECT TOP (1000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS i
+    FROM sys.all_objects a CROSS JOIN sys.all_objects b
+)
+INSERT split.Heap (Id, Val)
+SELECT i, i * 3
+FROM n;
+
+-- Statistics created with an index on an empty table have an empty histogram; split planning needs real ones.
+UPDATE STATISTICS split.Big WITH FULLSCAN;
+UPDATE STATISTICS split.BigOther WITH FULLSCAN;
+UPDATE STATISTICS split.Text WITH FULLSCAN;
+UPDATE STATISTICS split.NullKey WITH FULLSCAN;
+UPDATE STATISTICS split.Descending WITH FULLSCAN;
+UPDATE STATISTICS split.Parted WITH FULLSCAN;
+UPDATE STATISTICS split.PartedHeap WITH FULLSCAN;
+UPDATE STATISTICS split.PartedCci WITH FULLSCAN;
+UPDATE STATISTICS split.Heap WITH FULLSCAN;
+GO
