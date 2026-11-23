@@ -134,6 +134,16 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Verify_warns_about_unlisted_part_files()
+        {
+            ExportManifest manifest = Manifest();
+            File.WriteAllText(Path.Combine(this.folder, "dbo.T.part0001.json"), "[]");
+            Program.VerifyResult result = Program.CheckExport(this.folder, manifest);
+            Assert.Empty(result.Problems);
+            Assert.Contains(result.Warnings, w => w.StartsWith("dbo.T.part0001.json:"));
+        }
+
+        [Fact]
         public void Verify_warns_about_unlisted_compressed_data_files()
         {
             ExportManifest manifest = Manifest();

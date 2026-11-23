@@ -57,10 +57,10 @@ namespace bcpJson
                 tableArg, Arg(dataFile), Arg(formatFile), connectionArgs, splittable ? " -q" : string.Empty, batch, BcpLoadHints(noTableLock), Arg(errorLog));
         }
 
-        /// <summary>The table name a data file loads into by default: the file name without .gz and its extension.</summary>
+        /// <summary>The table name a data file loads into by default: the file name without .gz, its extension and a .partNNNN suffix.</summary>
         internal static string ImportBaseName(string fileName)
         {
-            return Path.GetFileNameWithoutExtension(FileCompression.WithoutGzipExtension(fileName));
+            return PartFiles.TableNameOf(fileName);
         }
 
         /// <summary>False for the export manifest and for unfinished ".partial" files, which a wildcard like *.json or * may match.</summary>
