@@ -72,7 +72,18 @@ From the design's "Later" list:
 - **Staging tables for large history tables:** load parts into staging tables and move them in over time. First step: **partition switching** (one indexed staging table per partition, loaded in parallel, then `SWITCH`).
 - **Partition-scoped work:** `TRUNCATE TABLE ... WITH (PARTITIONS (...))`, and exporting only chosen partitions (incremental backups of history tables).
 - **Sub-splitting a dominant partition**, and copying partition functions, schemes and filegroups to the target.
-- **Option 2** (load into a heap, then create the clustered index): decide after a 5,000,000-row benchmark run (1,000,000 rows: 5.0 s against 4.8 s with `--disable-indexes`). `benchmark.yml` is on master since v2.7.0, so the run can be dispatched.
+- **Option 2** (load into a heap, then create the clustered index): **decided: build it** (design started 2026-11-23). Benchmark run 45326185184 (2026-11-24, 5,000,000 rows, bigint identity clustered PK + two nonclustered indexes, 8 JSON parts, SQL Server 2022, 4 cores):
+
+  | Step | Seconds | Rows/s |
+  |---|---:|---:|
+  | Export JSON, unsplit / 8 parts | 8.4 / 6.3 | 595k / 794k |
+  | Export BCP, unsplit / 8 parts | 8.3 / 5.4 | 602k / 926k |
+  | Import into the indexed table (parts one after another) | 53.9 | 93k |
+  | Import with `--disable-indexes` | 30.1 | 166k |
+  | Import into a bare heap (parallel) | 12.3 | 407k |
+  | Option 2: heap load 12.9 + clustered PK 3.2 + two nonclustered 1.7 + 2.6 | 20.4 | 245k |
+
+  Option 2 is 33% faster than `--disable-indexes` and 2.6x a plain load; at 1,000,000 rows the two were even (5.0 s against 4.8 s). One run on a small runner with presorted keys: the ratios are indicative.
 - `--split-above` (automatic size threshold), per-table `--disable-indexes`, and `--disable-indexes` for `copy` into existing tables.
 - **Multi-column ranges** for skewed leading keys (one dominant value), and splitting unpartitioned heaps.
 - Splitting by row count, if a use case appears.
