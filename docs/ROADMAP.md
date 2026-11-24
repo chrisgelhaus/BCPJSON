@@ -55,7 +55,7 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
   - **`import --batch-size`, default 50,000** (as before for JSON; bcp import was 10,000), 0 = one transaction per file.
   - CI: `roundtrip.sh compression`. gzip JSON export matches the plain export after `zcat`; `.gz` import with 1,000-row batches and with `--batch-size 0`; gzip BCP export and import at `smallest`; verify on compressed exports; resume of a gzip export and refusal to resume it uncompressed. The `json` step covers the streaming import with plain files.
 
-## Done after v2.6.0 (PR #45, key-range splitting of large tables)
+## Done after v2.6.0 (PR #45, key-range splitting of large tables; released in v2.7.0)
 
 Design: `docs/superpowers/specs/2026-11-23-key-range-splitting-design.md` (with an "As built" section). Documented in the README, "Splitting large tables".
 
@@ -72,7 +72,7 @@ From the design's "Later" list:
 - **Staging tables for large history tables:** load parts into staging tables and move them in over time. First step: **partition switching** (one indexed staging table per partition, loaded in parallel, then `SWITCH`).
 - **Partition-scoped work:** `TRUNCATE TABLE ... WITH (PARTITIONS (...))`, and exporting only chosen partitions (incremental backups of history tables).
 - **Sub-splitting a dominant partition**, and copying partition functions, schemes and filegroups to the target.
-- **Option 2** (load into a heap, then create the clustered index): decide after a 5,000,000-row benchmark run (1,000,000 rows: 5.0 s against 4.8 s with `--disable-indexes`).
+- **Option 2** (load into a heap, then create the clustered index): decide after a 5,000,000-row benchmark run (1,000,000 rows: 5.0 s against 4.8 s with `--disable-indexes`). `benchmark.yml` is on master since v2.7.0, so the run can be dispatched.
 - `--split-above` (automatic size threshold), per-table `--disable-indexes`, and `--disable-indexes` for `copy` into existing tables.
 - **Multi-column ranges** for skewed leading keys (one dominant value), and splitting unpartitioned heaps.
 - Splitting by row count, if a use case appears.
@@ -90,7 +90,7 @@ Deferred on 2026-11-22. Sign-in with Microsoft Entra ID for Azure SQL Database, 
 
 ## Releases
 
-- v2.0.0 (2026-11-20): first tagged release. v2.0.1: SqlClient 7, SMO 181, SqlServer.Types 170. **v2.1.0** (2026-11-21, `c154790`): copy recreates keys and indexes; BCP import fix below. **v2.2.0** (`0a172f5`): `copy --foreign-keys`, snapshot consistency test. **v2.3.0** (2026-11-21, `03fd363`): copy recreates check constraints (default on) and triggers (`--triggers`). **v2.3.1** (2026-11-21, `5b37f35`): JSON export/import keep all 38 digits of `decimal`/`numeric` (export used to fail beyond 28-29 digits). **v2.4.0** (2026-11-21, `bb075a3`): `--retries` (connection and table-export retries), atomic `.partial` export files, `bcpjson-manifest.json` with the new `verify` verb and `export --resume`. **v2.5.0** (2026-11-22, `ac59a22`): `export --compress gzip` / `--compression-level`, streaming JSON import, `import --batch-size`. **v2.5.1** (2026-11-22, `696caa1`): CI round trips on SQL Server 2019, 2022 and 2025 (all required); `copy --drop-target` drops target tables one at a time (parallel drops deadlocked on 2019). **v2.6.0** (2026-11-23, `7cce4ab`): SRIDs kept in JSON (`SRID=n;<wkt>`), column order hints for JSON import, linux-arm64 and osx-arm64 packages.
+- v2.0.0 (2026-11-20): first tagged release. v2.0.1: SqlClient 7, SMO 181, SqlServer.Types 170. **v2.1.0** (2026-11-21, `c154790`): copy recreates keys and indexes; BCP import fix below. **v2.2.0** (`0a172f5`): `copy --foreign-keys`, snapshot consistency test. **v2.3.0** (2026-11-21, `03fd363`): copy recreates check constraints (default on) and triggers (`--triggers`). **v2.3.1** (2026-11-21, `5b37f35`): JSON export/import keep all 38 digits of `decimal`/`numeric` (export used to fail beyond 28-29 digits). **v2.4.0** (2026-11-21, `bb075a3`): `--retries` (connection and table-export retries), atomic `.partial` export files, `bcpjson-manifest.json` with the new `verify` verb and `export --resume`. **v2.5.0** (2026-11-22, `ac59a22`): `export --compress gzip` / `--compression-level`, streaming JSON import, `import --batch-size`. **v2.5.1** (2026-11-22, `696caa1`): CI round trips on SQL Server 2019, 2022 and 2025 (all required); `copy --drop-target` drops target tables one at a time (parallel drops deadlocked on 2019). **v2.6.0** (2026-11-23, `7cce4ab`): SRIDs kept in JSON (`SRID=n;<wkt>`), column order hints for JSON import, linux-arm64 and osx-arm64 packages. **v2.7.0** (2026-11-23, `383dc74`): `--split-tables` (key-range splitting for export, import and copy, partition-aware), `import --disable-indexes`, manifest-guided import of part files.
 
 ## Done in v2.1.0 (PR #28)
 
