@@ -200,3 +200,91 @@ DISABLE TRIGGER rt.TR_Child_Disabled ON rt.Child;
 GO
 CREATE TRIGGER rt.TR_Empty_InsteadOfDelete ON rt.Empty INSTEAD OF DELETE AS SET NOCOUNT ON;
 GO
+
+/* Schema split: tables for --split-tables (key ranges from statistics histograms and from partitions). */
+CREATE SCHEMA split;
+GO
+CREATE PARTITION FUNCTION pf_SplitMonth (DATETIME2(7)) AS RANGE RIGHT
+    FOR VALUES ('2026-01-01', '2026-02-01', '2026-03-01', '2026-04-01', '2026-05-01', '2026-06-01');
+CREATE PARTITION SCHEME ps_SplitMonth AS PARTITION pf_SplitMonth ALL TO ([PRIMARY]);
+GO
+
+-- Clustered primary key: the joined parts equal the unsplit export.
+CREATE TABLE split.Big
+(
+    Id     BIGINT         NOT NULL CONSTRAINT PK_Big PRIMARY KEY CLUSTERED,
+    Stamp  DATETIME2(7)   NOT NULL,
+    Code   VARCHAR(20)    NOT NULL,
+    Amount DECIMAL(18, 4) NOT NULL,
+    Note   NVARCHAR(50)   NULL
+);
+CREATE NONCLUSTERED INDEX IX_Big_Stamp ON split.Big (Stamp);
+CREATE UNIQUE NONCLUSTERED INDEX UX_Big_Code ON split.Big (Code);
+
+-- Same columns, clustered on another (non-unique) key and no primary key: an import target.
+CREATE TABLE split.BigOther
+(
+    Id     BIGINT         NOT NULL,
+    Stamp  DATETIME2(7)   NOT NULL,
+    Code   VARCHAR(20)    NOT NULL,
+    Amount DECIMAL(18, 4) NOT NULL,
+    Note   NVARCHAR(50)   NULL
+);
+CREATE CLUSTERED INDEX CX_BigOther_Stamp ON split.BigOther (Stamp);
+
+-- Case-sensitive string key; boundaries hold quotes and backslashes.
+CREATE TABLE split.Text
+(
+    Code VARCHAR(30) COLLATE Latin1_General_CS_AS NOT NULL CONSTRAINT PK_Text PRIMARY KEY CLUSTERED,
+    Seq  INT                                      NOT NULL
+);
+
+-- Nullable, non-unique clustered key: NULLs go with the first part.
+CREATE TABLE split.NullKey
+(
+    K  INT NULL,
+    Id INT NOT NULL
+);
+CREATE CLUSTERED INDEX CX_NullKey_K ON split.NullKey (K);
+
+-- Descending key: part 1 holds the highest values.
+CREATE TABLE split.Descending
+(
+    Id  BIGINT NOT NULL,
+    Val INT    NOT NULL,
+    CONSTRAINT PK_Descending PRIMARY KEY CLUSTERED (Id DESC)
+);
+
+-- Partitioned by month on Stamp, which is not the leading key column.
+CREATE TABLE split.Parted
+(
+    Id    INT          NOT NULL,
+    Stamp DATETIME2(7) NOT NULL,
+    Val   INT          NOT NULL,
+    CONSTRAINT PK_Parted PRIMARY KEY CLUSTERED (Id, Stamp) ON ps_SplitMonth (Stamp)
+);
+
+-- Partitioned heap with a nullable partitioning column (NULLs live in partition 1).
+CREATE TABLE split.PartedHeap
+(
+    Id    INT          NOT NULL,
+    Stamp DATETIME2(7) NULL,
+    Val   INT          NOT NULL
+) ON ps_SplitMonth (Stamp);
+
+-- Partitioned clustered columnstore.
+CREATE TABLE split.PartedCci
+(
+    Id    INT          NOT NULL,
+    Stamp DATETIME2(7) NOT NULL,
+    Val   INT          NOT NULL
+) ON ps_SplitMonth (Stamp);
+CREATE CLUSTERED COLUMNSTORE INDEX CCI_PartedCci ON split.PartedCci ON ps_SplitMonth (Stamp);
+
+-- Unpartitioned heap: cannot be split.
+CREATE TABLE split.Heap
+(
+    Id  INT NOT NULL,
+    Val INT NULL
+);
+GO

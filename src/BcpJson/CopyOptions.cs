@@ -81,6 +81,11 @@ namespace bcpJson
         [Option("snapshot", Default = false, Required = false, HelpText = "Copy from a database snapshot of the source so every table reflects the same point in time. Needs CREATE DATABASE permission and SQL Server 2016 SP1+ (any edition); the snapshot is dropped afterwards.")]
         public bool Snapshot { get; set; }
 
+        [Option("split-tables", Separator = ',', Required = false, HelpText = "Split tables into key ranges copied in parallel: schema.table[:parts], * wildcard, parts 2-200 (default 8).")]
+        public IEnumerable<string> SplitTables { get; set; }
+
+        public List<SplitRequest> SplitRequests { get; private set; } = new List<SplitRequest>();
+
         [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries when opening a connection fails transiently (network error, failover, throttling), with exponential backoff. Copies themselves are not retried. 0 = no retries.")]
         public int Retries { get; set; }
 
@@ -92,6 +97,18 @@ namespace bcpJson
         public string TargetConnectionString()
         {
             return SqlConnectionFactory.Build(this.TargetSQLServer, this.TargetSQLDatabase, this.TargetSQLLogin, this.TargetSQLPassword, false, this.TrustServerCertificate);
+        }
+
+        /// <summary>Parses --split-tables into SplitRequests. Returns the error (or null) and the snapshot warning (or null). No connection is made.</summary>
+        internal (string Error, string Warning) ValidateSplit()
+        {
+            if (!SplitRequest.TryParse(this.SplitTables, out List<SplitRequest> requests, out string error))
+            {
+                return (error, null);
+            }
+
+            this.SplitRequests = requests;
+            return (null, SplitRequest.SnapshotWarning(requests.Count > 0, this.Snapshot, "copy"));
         }
 
         public bool Valid()
@@ -121,6 +138,18 @@ namespace bcpJson
             if (this.ForeignKeys && !this.Snapshot)
             {
                 Program.PostToConsole("--foreign-keys without --snapshot: if the source changes during the copy, a child row can be copied without its parent and the foreign key check will fail. Consider adding --snapshot.", Program.InfoLevel.Warning);
+            }
+
+            (string splitError, string splitWarning) = this.ValidateSplit();
+            if (splitError != null)
+            {
+                Program.PostToConsole(splitError, Program.InfoLevel.Error);
+                return false;
+            }
+
+            if (splitWarning != null)
+            {
+                Program.PostToConsole(splitWarning, Program.InfoLevel.Warning);
             }
 
             if (!string.IsNullOrEmpty(this.Query))

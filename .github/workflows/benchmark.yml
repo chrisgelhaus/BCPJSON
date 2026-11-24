@@ -1,0 +1,69 @@
+name: Benchmark
+
+# Manual only: measures split exports and the load options for one large table (see tests/integration/benchmark.sh).
+# It is not a required check and never runs on push or pull requests.
+on:
+  workflow_dispatch:
+    inputs:
+      rows:
+        description: Rows in the benchmark table
+        default: "5000000"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  benchmark:
+    name: Split load benchmark (SQL Server 2022)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Throwaway password for the ephemeral container only; not a secret.
+      SQL_PASSWORD: BcpJson-CI-2026x
+      SQL_SERVER: localhost,1433
+      BCPJSON: ${{ github.workspace }}/publish/bcpjson
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: BcpJson-CI-2026x
+          MSSQL_PID: Developer
+        ports:
+          - 1433:1433
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Publish linux-x64 single-file executable
+        run: dotnet publish src/BcpJson/BcpJson.csproj -c Release -r linux-x64 -o publish
+
+      - name: Install sqlcmd and bcp
+        run: bash tests/integration/install-mssql-tools.sh
+
+      - name: Wait for SQL Server
+        run: |
+          for i in $(seq 1 60); do
+            if sqlcmd -S "$SQL_SERVER" -U sa -P "$SQL_PASSWORD" -C -Q "SELECT 1" -b -o /dev/null; then
+              echo "SQL Server is ready after ${i} attempt(s)."
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::SQL Server did not become ready."
+          docker logs "${{ job.services.mssql.id }}" || true
+          exit 1
+
+      - name: Benchmark
+        env:
+          ROWS: ${{ inputs.rows }}
+        run: bash tests/integration/benchmark.sh "$ROWS"

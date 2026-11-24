@@ -37,19 +37,22 @@ namespace bcpJson
             }
 
             var createdTables = new ConcurrentBag<TableRef>();
-            Parallel.ForEach(tables, Parallelism(maxTasks), table =>
+            List<CopyItem> items = PlanCopyItems(setting, tables, createdTables);
+
+            // Every item reports its own failures, so RunLargestFirst has nothing to collect but a failed preparation,
+            // which is reported once per table.
+            WorkQueue.RunLargestFirst(items, i => i.Size, maxTasks, item =>
             {
                 try
                 {
-                    long copied = CopyTable(setting, table, createdTables);
-                    if (copied > 0)
-                    {
-                        Interlocked.Add(ref totalrowCount, copied);
-                    }
+                    item.Work.Run(() => Interlocked.Add(ref totalrowCount, CopyItemRanges(setting, item)));
                 }
                 catch (Exception ex)
                 {
-                    PostToConsole(string.Format("{0}: {1}", table.DisplayName, ex.Message), InfoLevel.Error);
+                    if (Interlocked.Exchange(ref item.Context.FailureReported, 1) == 0)
+                    {
+                        PostToConsole(ex.Message, InfoLevel.Error);
+                    }
                 }
             });
 
@@ -347,7 +350,119 @@ WHERE s.name = @schema AND t.name = @table;";
             }
         }
 
-        private static long CopyTable(CopyOptions setting, TableRef tableRef, ConcurrentBag<TableRef> createdTables)
+        /// <summary>One unit of copy work: a whole table (Range null) or one key range of a split table.</summary>
+        private sealed record CopyItem(TableRef Table, KeyRange Range, TableSplit Split, long Size, CopyTableContext Context, TableWork Work);
+
+        /// <summary>What a table's preparation (TableWork's before) found out, shared by the table's items.</summary>
+        private sealed class CopyTableContext
+        {
+            /// <summary>The columns copied: computed and rowversion columns are left out.</summary>
+            public List<string> Columns;
+            public string TargetName;
+            public bool Created;
+            public bool NeedsBcp;
+            public LoadMode Mode;
+            /// <summary>Set at the end of a successful preparation.</summary>
+            public bool Prepared;
+            public int FailedParts;
+            /// <summary>Sequential mode: 1 once an item has taken every part.</summary>
+            public int SequentialClaimed;
+            /// <summary>1 once a failed preparation was reported (every item of the table sees it).</summary>
+            public int FailureReported;
+        }
+
+        /// <summary>
+        /// The copy work items, sized by rows: one per unsplit table and one per part of a table matched by
+        /// --split-tables. Ranges are planned on the source (the snapshot with --snapshot). A table copied through bcp
+        /// is never split. When planning cannot start (no connection), the error is reported and nothing is copied.
+        /// </summary>
+        private static List<CopyItem> PlanCopyItems(CopyOptions setting, List<TableRef> tables, ConcurrentBag<TableRef> createdTables)
+        {
+            WarnUnmatchedSplitRequests(setting.SplitRequests, tables);
+            var items = new List<CopyItem>();
+            try
+            {
+                using (var conn = SqlConnectionFactory.Create(setting.SourceConnectionString()))
+                {
+                    conn.Open();
+                    Dictionary<int, long> rowCounts = TableRowCounts(conn);
+                    foreach (TableRef table in tables)
+                    {
+                        PlanCopyTable(setting, conn, table, rowCounts, createdTables, items);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                PostToConsole(ex.Message, InfoLevel.Error);
+                return new List<CopyItem>();
+            }
+            return items;
+        }
+
+        /// <summary>Adds one table's copy items to <paramref name="items"/>; a table whose planning fails is reported and left out.</summary>
+        private static void PlanCopyTable(CopyOptions setting, SqlConnection conn, TableRef table, Dictionary<int, long> rowCounts,
+            ConcurrentBag<TableRef> createdTables, List<CopyItem> items)
+        {
+            long rows = rowCounts.TryGetValue(table.ObjectId, out long counted) ? counted : 0;
+            try
+            {
+                TableSplit split = null;
+                int? requested = SplitRequest.PartsFor(setting.SplitRequests, table.DisplayName);
+                if (requested != null)
+                {
+                    split = SplitOrWhole(table.DisplayName, () =>
+                    {
+                        if (HasBcpOnlyColumns(conn, table.ObjectId))
+                        {
+                            return (null, "copied through bcp (geography/geometry/hierarchyid columns)");
+                        }
+                        TableSplit planned = PlanSplit(conn, table, requested.Value, out string reason);
+                        return (planned, reason);
+                    });
+                }
+
+                var context = new CopyTableContext();
+                int parts = split?.Ranges.Count ?? 1;
+                var work = new TableWork(table.DisplayName, parts,
+                    () => PrepareCopyTarget(setting, table, context, parts),
+                    () => FinishCopiedTable(setting, table, context, parts, createdTables));
+                if (split == null)
+                {
+                    items.Add(new CopyItem(table, null, null, rows, context, work));
+                    return;
+                }
+                for (int i = 0; i < split.Ranges.Count; i++)
+                {
+                    long estimate = split.EstimatedRows[i] >= 0 ? split.EstimatedRows[i] : rows / split.Ranges.Count;
+                    items.Add(new CopyItem(table, split.Ranges[i], split, estimate, context, work));
+                }
+            }
+            catch (Exception ex)
+            {
+                PostToConsole(string.Format("{0}: {1}", table.DisplayName, ex.Message), InfoLevel.Error);
+            }
+        }
+
+        /// <summary>Whether the table has geography, geometry or hierarchyid columns, which SqlBulkCopy cannot stream (copied through bcp).</summary>
+        private static bool HasBcpOnlyColumns(SqlConnection conn, int objectId)
+        {
+            const string sql = @"SET NOCOUNT ON;
+SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.columns c INNER JOIN sys.types t ON t.user_type_id = c.user_type_id
+    WHERE c.object_id = @objectId AND t.is_user_defined = 0 AND t.name IN (N'geography', N'geometry', N'hierarchyid')) THEN 1 ELSE 0 END;";
+            using (var cmd = new SqlCommand(sql, conn))
+            {
+                cmd.Parameters.Add("@objectId", SqlDbType.Int).Value = objectId;
+                return (int)cmd.ExecuteScalar() == 1;
+            }
+        }
+
+        /// <summary>
+        /// A table's preparation, once before its first part: drops/truncates/creates the target (PrepareTargetTable)
+        /// and works out the columns, whether bcp is needed and, for a split table, the load mode of the target as it
+        /// is now (a table this run created is a heap until its indexes are built after the load).
+        /// </summary>
+        private static void PrepareCopyTarget(CopyOptions setting, TableRef tableRef, CopyTableContext context, int parts)
         {
             string sourceConnectionString = setting.SourceConnectionString();
             string targetConnectionString = setting.TargetConnectionString();
@@ -359,12 +474,7 @@ WHERE s.name = @schema AND t.name = @table;";
                 var targetServer = new Server(new ServerConnection(targetSql));
                 try
                 {
-                    Database sourceDatabase = sourceServer.Databases[new SqlConnectionStringBuilder(sourceConnectionString).InitialCatalog];
-                    Table sourceTable = sourceDatabase?.Tables.ItemById(tableRef.ObjectId);
-                    if (sourceTable == null)
-                    {
-                        throw new InvalidOperationException("Source table not found.");
-                    }
+                    Table sourceTable = SourceTable(sourceServer, sourceConnectionString, tableRef);
 
                     Database targetDatabase = targetServer.Databases[new SqlConnectionStringBuilder(targetConnectionString).InitialCatalog];
                     if (targetDatabase == null)
@@ -373,20 +483,159 @@ WHERE s.name = @schema AND t.name = @table;";
                     }
 
                     Table targetTable = PrepareTargetTable(setting, sourceTable, targetDatabase, targetServer, out bool created);
-
-                    bool needsBcp = sourceTable.Columns.Cast<Column>().Any(col =>
+                    context.Created = created;
+                    context.TargetName = QuoteName(targetTable.Schema) + "." + QuoteName(targetTable.Name);
+                    context.NeedsBcp = sourceTable.Columns.Cast<Column>().Any(col =>
                         col.DataType.SqlDataType == SqlDataType.Geography ||
                         col.DataType.SqlDataType == SqlDataType.Geometry ||
                         col.DataType.SqlDataType == SqlDataType.HierarchyId);
 
-                    long copied = needsBcp
-                        ? CopyTableViaBcp(setting, tableRef)
-                        : CopyTableViaBulkCopy(setting, sourceTable, targetTable, tableRef);
+                    // Computed and rowversion columns cannot be written; they are recalculated by the target.
+                    context.Columns = sourceTable.Columns.Cast<Column>()
+                        .Where(c => !c.Computed && c.DataType.SqlDataType != SqlDataType.Timestamp)
+                        .Select(c => c.Name)
+                        .ToList();
+                }
+                finally
+                {
+                    sourceServer.ConnectionContext.Disconnect();
+                    targetServer.ConnectionContext.Disconnect();
+                }
+            }
 
-                    // Keys and indexes are built after the load (bulk loading a heap is fastest), and only on tables
-                    // this run created: an existing target keeps its own indexes.
-                    if (created && copied >= 0)
+            if (parts > 1)
+            {
+                using (var conn = SqlConnectionFactory.Create(targetConnectionString))
+                {
+                    conn.Open();
+                    int objectId;
+                    using (var cmd = new SqlCommand("SELECT OBJECT_ID(@name, N'U');", conn))
                     {
+                        cmd.Parameters.Add("@name", SqlDbType.NVarChar, 520).Value = context.TargetName;
+                        object id = cmd.ExecuteScalar();
+                        if (id == null || id == DBNull.Value)
+                        {
+                            throw new InvalidOperationException("Target table not found after preparing it.");
+                        }
+                        objectId = (int)id;
+                    }
+                    TargetShape shape = ReadTargetShape(conn, objectId, new HashSet<int>());
+                    string sequentialReason = LoadPlanning.SequentialReason(shape, !setting.NoTableLock, false);
+                    context.Mode = sequentialReason == null ? LoadMode.Parallel : LoadMode.Sequential;
+                    PostToConsole(sequentialReason == null
+                        ? string.Format("{0}: {1} parts, loading in parallel.", tableRef.DisplayName, parts)
+                        : string.Format("{0}: {1} parts, loading one after another ({2}).", tableRef.DisplayName, parts, sequentialReason));
+                }
+            }
+            context.Prepared = true;
+        }
+
+        /// <summary>The source table through SMO.</summary>
+        private static Table SourceTable(Server sourceServer, string sourceConnectionString, TableRef tableRef)
+        {
+            Database sourceDatabase = sourceServer.Databases[new SqlConnectionStringBuilder(sourceConnectionString).InitialCatalog];
+            Table sourceTable = sourceDatabase?.Tables.ItemById(tableRef.ObjectId);
+            if (sourceTable == null)
+            {
+                throw new InvalidOperationException("Source table not found.");
+            }
+            return sourceTable;
+        }
+
+        /// <summary>
+        /// Copies what one item covers and returns the rows copied: its own range, or the whole table (Range null).
+        /// In sequential mode the first item of a table to start copies every part in key order and the others do
+        /// nothing. Failures are reported here and counted in the table's context.
+        /// </summary>
+        private static long CopyItemRanges(CopyOptions setting, CopyItem item)
+        {
+            CopyTableContext context = item.Context;
+            IEnumerable<KeyRange> ranges;
+            if (item.Range == null || context.Mode == LoadMode.Parallel)
+            {
+                ranges = new[] { item.Range };
+            }
+            else if (Interlocked.Exchange(ref context.SequentialClaimed, 1) == 0)
+            {
+                ranges = item.Split.Ranges;
+            }
+            else
+            {
+                return 0;
+            }
+
+            long total = 0;
+            foreach (KeyRange range in ranges)
+            {
+                string label = range == null ? item.Table.DisplayName : PartFiles.PartName(item.Table.DisplayName, range.Part);
+                try
+                {
+                    if (context.NeedsBcp && range != null)
+                    {
+                        // bcp copies whole tables; planning never splits such a table, so this would copy it once per part.
+                        throw new InvalidOperationException("this table is copied through bcp and cannot be copied in parts.");
+                    }
+                    long copied = context.NeedsBcp
+                        ? CopyTableViaBcp(setting, item.Table)
+                        : CopyTableViaBulkCopy(setting, context, item.Table, range, item.Split?.Column, label);
+                    if (copied < 0)
+                    {
+                        Interlocked.Increment(ref context.FailedParts);
+                    }
+                    else
+                    {
+                        total += copied;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Interlocked.Increment(ref context.FailedParts);
+                    PostToConsole(string.Format("{0}: {1}", label, ex.Message), InfoLevel.Error);
+                }
+            }
+            return total;
+        }
+
+        /// <summary>
+        /// A table's finish, once after its last part: on a table this run created, and only when every part was
+        /// copied, builds the keys, indexes and check constraints and records the table for foreign keys and triggers.
+        /// Keys and indexes are built after the load (bulk loading a heap is fastest); an existing target keeps its own.
+        /// </summary>
+        private static void FinishCopiedTable(CopyOptions setting, TableRef tableRef, CopyTableContext context, int parts, ConcurrentBag<TableRef> createdTables)
+        {
+            if (!context.Prepared)
+            {
+                return;   // the failed preparation is reported by the items
+            }
+
+            int failed = Volatile.Read(ref context.FailedParts);
+            if (failed > 0)
+            {
+                // An unsplit table's failure is already reported; a split table also says what it left behind.
+                if (parts > 1)
+                {
+                    PostToConsole(string.Format(context.Created
+                            ? "{0}: copy incomplete ({1} of {2} parts failed); keys, indexes and check constraints not created."
+                            : "{0}: copy incomplete ({1} of {2} parts failed).",
+                        tableRef.DisplayName, failed, parts), InfoLevel.Error);
+                }
+                return;
+            }
+
+            if (!context.Created)
+            {
+                return;
+            }
+
+            try
+            {
+                string sourceConnectionString = setting.SourceConnectionString();
+                using (var sourceSql = SqlConnectionFactory.Create(sourceConnectionString))
+                {
+                    var sourceServer = new Server(new ServerConnection(sourceSql));
+                    try
+                    {
+                        Table sourceTable = SourceTable(sourceServer, sourceConnectionString, tableRef);
                         if (setting.NoIndexes)
                         {
                             PostToConsole(string.Format("{0}: Primary key and indexes not created (--no-indexes).", tableRef.DisplayName));
@@ -409,14 +658,15 @@ WHERE s.name = @schema AND t.name = @table;";
                         }
                         createdTables.Add(tableRef);
                     }
-
-                    return copied;
+                    finally
+                    {
+                        sourceServer.ConnectionContext.Disconnect();
+                    }
                 }
-                finally
-                {
-                    sourceServer.ConnectionContext.Disconnect();
-                    targetServer.ConnectionContext.Disconnect();
-                }
+            }
+            catch (Exception ex)
+            {
+                PostToConsole(string.Format("{0}: {1}", tableRef.DisplayName, ex.Message), InfoLevel.Error);
             }
         }
 
@@ -485,6 +735,17 @@ WHERE s.name = @schema AND t.name = @table;";
                 }
 
                 targetTable.Columns.Add(column);
+            }
+
+            // A partitioned source lands on the same partition scheme when the target has one of that name: indexes are
+            // scripted with their scheme, and a clustered columnstore index must be aligned with its table.
+            if (sourceTable.IsPartitioned && targetDatabase.PartitionSchemes.Contains(sourceTable.PartitionScheme))
+            {
+                targetTable.PartitionScheme = sourceTable.PartitionScheme;
+                foreach (PartitionSchemeParameter parameter in sourceTable.PartitionSchemeParameters)
+                {
+                    targetTable.PartitionSchemeParameters.Add(new PartitionSchemeParameter(targetTable, parameter.Name));
+                }
             }
             targetTable.Create();
             created = true;
@@ -571,16 +832,18 @@ WHERE s.name = @schema AND t.name = @table;";
             }
         }
 
-        private static long CopyTableViaBulkCopy(CopyOptions setting, Table sourceTable, Table targetTable, TableRef tableRef)
+        /// <summary>The source query of a copy: the given columns of the table, only the range's rows when range is not null.</summary>
+        internal static string CopySelectSql(IEnumerable<string> columns, string quotedTable, bool noLock, KeyRange range, SplitColumn column)
         {
-            // Computed and rowversion columns cannot be written; they are recalculated by the target.
-            List<string> columns = sourceTable.Columns.Cast<Column>()
-                .Where(c => !c.Computed && c.DataType.SqlDataType != SqlDataType.Timestamp)
-                .Select(c => c.Name)
-                .ToList();
+            return "SELECT " + string.Join(", ", columns.Select(QuoteName)) + " FROM " + quotedTable
+                + (noLock ? " WITH (NOLOCK)" : string.Empty)
+                + (range == null ? string.Empty : " WHERE " + range.Predicate(column));
+        }
 
-            string select = "SELECT " + string.Join(", ", columns.Select(QuoteName)) + " FROM " + tableRef.QuotedName
-                + (setting.NoLock ? " WITH (NOLOCK)" : string.Empty);
+        /// <summary>Streams the table (range null) or one key range of it from the source into the prepared target.</summary>
+        private static long CopyTableViaBulkCopy(CopyOptions setting, CopyTableContext context, TableRef tableRef, KeyRange range, SplitColumn column, string label)
+        {
+            string select = CopySelectSql(context.Columns, tableRef.QuotedName, setting.NoLock, range, column);
 
             using (var sourceConn = SqlConnectionFactory.Create(setting.SourceConnectionString()))
             {
@@ -591,19 +854,19 @@ WHERE s.name = @schema AND t.name = @table;";
                     using (var reader = cmd.ExecuteReader(CommandBehavior.SingleResult))
                     using (var bulkCopy = new SqlBulkCopy(setting.TargetConnectionString(), LoadOptions(setting.NoTableLock)))
                     {
-                        bulkCopy.DestinationTableName = QuoteName(targetTable.Schema) + "." + QuoteName(targetTable.Name);
+                        bulkCopy.DestinationTableName = context.TargetName;
                         bulkCopy.BatchSize = 10000;
                         bulkCopy.BulkCopyTimeout = 0;
                         bulkCopy.EnableStreaming = true;
-                        foreach (string column in columns)
+                        foreach (string name in context.Columns)
                         {
-                            bulkCopy.ColumnMappings.Add(column, column);
+                            bulkCopy.ColumnMappings.Add(name, name);
                         }
 
                         bulkCopy.WriteToServer(reader);
 
                         long rowsCopied = SqlBulkCopyHelper.GetRowsCopied(bulkCopy);
-                        PostToConsole(string.Format("{0}: {1:N0}", tableRef.DisplayName, rowsCopied), InfoLevel.Info);
+                        PostToConsole(string.Format("{0}: {1:N0}", label, rowsCopied), InfoLevel.Info);
                         return rowsCopied;
                     }
                 }

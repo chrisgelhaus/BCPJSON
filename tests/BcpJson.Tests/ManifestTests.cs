@@ -134,6 +134,16 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Verify_warns_about_unlisted_part_files()
+        {
+            ExportManifest manifest = Manifest();
+            File.WriteAllText(Path.Combine(this.folder, "dbo.T.part0001.json"), "[]");
+            Program.VerifyResult result = Program.CheckExport(this.folder, manifest);
+            Assert.Empty(result.Problems);
+            Assert.Contains(result.Warnings, w => w.StartsWith("dbo.T.part0001.json:"));
+        }
+
+        [Fact]
         public void Verify_warns_about_unlisted_compressed_data_files()
         {
             ExportManifest manifest = Manifest();
@@ -170,6 +180,74 @@ namespace bcpJson.Tests
             Assert.Contains(result.Problems, p => p.Contains("did not complete"));
             Assert.Contains(result.Problems, p => p.StartsWith("dbo.A.json: SHA-256"));
             Assert.Contains(result.Problems, p => p == "dbo.B.json: missing.");
+        }
+
+        private static ManifestTable Shell(int parts)
+        {
+            return new ManifestTable { Name = "dbo.T", Split = new ManifestSplit { Kind = "histogram", Column = "Id", Type = "bigint", PartCount = parts, Parts = new List<ManifestPart>() } };
+        }
+
+        private void RecordPart(ExportManifest m, int p, string content)
+        {
+            string name = string.Format("dbo.T.part{0:0000}.json", p);
+            File.WriteAllText(Path.Combine(this.folder, name), content);
+            m.RecordPart(Shell(3), ManifestPart.From(new KeyRange { Part = p }, 10 * p, new[] { name }),
+                new[] { ManifestFile.Describe(this.folder, name) }, this.folder);
+        }
+
+        [Fact]
+        public void Parts_recorded_concurrently_merge_into_one_entry()
+        {
+            var m = new ExportManifest { Format = "json" };
+            Parallel.For(1, 4, p => RecordPart(m, p, new string('x', p)));
+            ManifestTable t = ExportManifest.Load(this.folder).Find("dbo.T");
+            Assert.Equal(60, t.Rows);
+            Assert.Equal(new[] { 1, 2, 3 }, t.Split.Parts.Select(p => p.Part));
+            Assert.Equal(3, t.Files.Count);
+            Assert.True(m.IsIntact("dbo.T", this.folder, true));
+        }
+
+        [Fact]
+        public void Missing_or_damaged_parts_are_redone()
+        {
+            var m = new ExportManifest { Format = "json" };
+            RecordPart(m, 1, "a");
+            RecordPart(m, 2, "bb");
+            File.WriteAllText(Path.Combine(this.folder, "dbo.T.part0002.json"), "different length");
+            Assert.Equal(new[] { 2, 3 }, m.PartsToRedo("dbo.T", this.folder));
+            Assert.False(m.IsIntact("dbo.T", this.folder, false));
+            Assert.Empty(m.PartsToRedo("dbo.Other", this.folder));
+        }
+
+        [Fact]
+        public void Unsplit_entries_have_no_split_key()
+        {
+            Manifest();
+            string json = File.ReadAllText(ExportManifest.PathIn(this.folder));
+            Assert.DoesNotContain("split", json);
+        }
+
+        [Fact]
+        public void Verify_reports_a_split_table_with_missing_parts()
+        {
+            var m = new ExportManifest { Format = "json", Completed = DateTime.UtcNow };
+            RecordPart(m, 1, "a");
+            RecordPart(m, 2, "bb");
+            Program.VerifyResult result = Program.CheckExport(this.folder, m);
+            Assert.Contains("dbo.T: 2 of 3 parts exported.", result.Problems);
+        }
+
+        [Fact]
+        public void Part_ranges_round_trip()
+        {
+            var range = new KeyRange { Part = 4, Lower = "1", LowerInclusive = true, Upper = "9", UpperInclusive = false, IncludeNulls = true };
+            KeyRange back = ManifestPart.From(range, 5, new[] { "f" }).ToRange();
+            Assert.Equal(4, back.Part);
+            Assert.Equal("1", back.Lower);
+            Assert.True(back.LowerInclusive);
+            Assert.Equal("9", back.Upper);
+            Assert.False(back.UpperInclusive);
+            Assert.True(back.IncludeNulls);
         }
 
         [Fact]

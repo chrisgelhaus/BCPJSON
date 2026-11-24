@@ -60,6 +60,11 @@ namespace bcpJson
         [Option("snapshot", Default = false, Required = false, HelpText = "Export from a database snapshot of the source so every table reflects the same point in time, however long the export runs. Needs CREATE DATABASE permission and SQL Server 2016 SP1+ (any edition); the snapshot is dropped afterwards.")]
         public bool Snapshot { get; set; }
 
+        [Option("split-tables", Separator = ',', Required = false, HelpText = "Split tables into key ranges exported in parallel: schema.table[:parts], * wildcard, parts 2-200 (default 8).")]
+        public IEnumerable<string> SplitTables { get; set; }
+
+        public List<SplitRequest> SplitRequests { get; private set; } = new List<SplitRequest>();
+
         [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries after a transient failure (network error, failover, throttling), with exponential backoff. Applies to opening connections and to exporting a table, which is redone from the start. --source-query exports are not retried. 0 = no retries.")]
         public int Retries { get; set; }
 
@@ -92,6 +97,24 @@ namespace bcpJson
         public string SourceConnectionString()
         {
             return SqlConnectionFactory.Build(this.srcServer, this.srcDatabase, this.srcLogin, this.srcPassword, true, this.TrustServerCertificate);
+        }
+
+        /// <summary>Parses --split-tables into SplitRequests. Returns the error (or null) and the snapshot warning (or null). No connection is made.</summary>
+        internal (string Error, string Warning) ValidateSplit()
+        {
+            if (!SplitRequest.TryParse(this.SplitTables, out List<SplitRequest> requests, out string error))
+            {
+                return (error, null);
+            }
+
+            this.SplitRequests = requests;
+
+            if (requests.Count > 0 && this.IsQueryExport)
+            {
+                return ("--split-tables cannot be combined with --source-query: only table exports can be split.", null);
+            }
+
+            return (null, SplitRequest.SnapshotWarning(requests.Count > 0, this.Snapshot, "export"));
         }
 
         public bool Valid()
@@ -128,6 +151,18 @@ namespace bcpJson
             {
                 Program.PostToConsole("--snapshot needs --source-database (the database to snapshot).", Program.InfoLevel.Error);
                 return false;
+            }
+
+            (string splitError, string splitWarning) = this.ValidateSplit();
+            if (splitError != null)
+            {
+                Program.PostToConsole(splitError, Program.InfoLevel.Error);
+                return false;
+            }
+
+            if (splitWarning != null)
+            {
+                Program.PostToConsole(splitWarning, Program.InfoLevel.Warning);
             }
 
             if (string.IsNullOrEmpty(this.exportPath))

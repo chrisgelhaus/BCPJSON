@@ -44,10 +44,13 @@ namespace bcpJson
         [Option("no-table-lock", Default = false, Required = false, HelpText = "Load without a table lock (TABLOCK). By default the target is locked for the load, which is fastest and allows minimal logging; use this when other sessions must keep reading or writing the table during the load, or when several files load into one table with a clustered index.")]
         public bool NoTableLock { get; set; }
 
+        [Option("disable-indexes", Default = false, Required = false, HelpText = "Disable nonclustered indexes (except the primary key and indexes used by foreign keys) during the load and rebuild them afterwards.")]
+        public bool DisableIndexes { get; set; }
+
         [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries when opening a connection fails transiently (network error, failover, throttling), with exponential backoff. Loads themselves are not retried. 0 = no retries.")]
         public int Retries { get; set; }
 
-        [Option("batch-size", Default = Program.DefaultBatchSize, Required = false, HelpText = "Rows per committed batch during the load (JSON and bcp). Larger batches load faster; a failure rolls back only the current batch. 0 = the whole file in one transaction.")]
+        [Option("batch-size", Default = Program.DefaultBatchSize, Required = false, HelpText = "Rows per committed batch during the load (JSON and bcp). Larger batches load faster; a failure rolls back only the current batch. 0 = the whole file in one transaction (one per part file of a split table).")]
         public int BatchSize { get; set; } = Program.DefaultBatchSize;
 
         public string GetTargetConnectionString()

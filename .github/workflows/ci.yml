@@ -112,6 +112,13 @@ jobs:
         id: setup
         run: bash tests/integration/roundtrip.sh setup
 
+      - name: Bulk load lock modes
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        shell: pwsh
+        env:
+          SQL_USER: sa
+        run: ./tests/integration/lock_probe.ps1
+
       # The three round trips are independent: each runs whenever setup succeeded, so one failure
       # does not hide the results of the others.
       - name: JSON round trip (export, import, export)
@@ -141,6 +148,10 @@ jobs:
       - name: Compression (gzip JSON and BCP, streamed import, batch sizes)
         if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
         run: bash tests/integration/roundtrip.sh compression
+
+      - name: Split tables (key ranges and partitions)
+        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
+        run: bash tests/integration/roundtrip.sh split
 
       - name: Upload exported files
         if: failure()

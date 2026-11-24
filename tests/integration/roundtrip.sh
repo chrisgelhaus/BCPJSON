@@ -15,6 +15,11 @@
 #                          connection retry while the database comes online
 #   roundtrip.sh compression  export --compress gzip (JSON and BCP) -> verify -> import the .gz files (small and
 #                          single-transaction batches) -> export JSON, diff with the source export; --resume rules
+#   roundtrip.sh split     CONVERT styles of split boundaries; export --split-tables (JSON from a snapshot, BCP): part
+#                          counts, verify, joined parts equal the unsplit export; --resume redoes a missing part;
+#                          import of the parts (load modes, --disable-indexes and a failing unique rebuild, another
+#                          clustered key, BCP parts, truncate once per table); copy --split-tables (parallel parts
+#                          into new tables, one after another into clustered targets, CLR tables unsplit)
 #
 # Table locking: JSON import and copy use the default (TABLOCK); BCP import uses --no-table-lock.
 #
@@ -137,11 +142,15 @@ compare_decimals() {
     echo "plain.Decimals identical to the source: $actual"
 }
 
-# Empty database with the test schemas but no tables (copy creates them).
+# Empty database with the test schemas but no tables (copy creates them). copy scripts the indexes of partitioned
+# tables with their partition scheme, so the scheme of schema.sql must exist too.
 create_empty_db() {
     local db="$1"
     sql -Q "IF DB_ID(N'$db') IS NOT NULL BEGIN ALTER DATABASE [$db] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE [$db]; END; CREATE DATABASE [$db];"
-    sql -d "$db" -Q "EXEC (N'CREATE SCHEMA rt'); EXEC (N'CREATE SCHEMA plain');"
+    sql -d "$db" -Q "EXEC (N'CREATE SCHEMA rt'); EXEC (N'CREATE SCHEMA plain'); EXEC (N'CREATE SCHEMA split');
+        CREATE PARTITION FUNCTION pf_SplitMonth (DATETIME2(7)) AS RANGE RIGHT
+            FOR VALUES ('2026-01-01', '2026-02-01', '2026-03-01', '2026-04-01', '2026-05-01', '2026-06-01');
+        CREATE PARTITION SCHEME ps_SplitMonth AS PARTITION pf_SplitMonth ALL TO ([PRIMARY]);"
 }
 
 # Object definitions compared between source and copy; each has a <kind>.sql returning one line per object.
@@ -185,6 +194,22 @@ assert_gzip_export() {
     done
     [ "$(jq -r '.compression' "$dir/$MANIFEST")" = "gzip" ] || { echo "::error::Manifest does not record gzip"; return 1; }
     echo "$count valid $ext.gz files."
+}
+
+# Number of part files <table>.partNNNN.<ext> in a folder.
+part_count() {
+    local dir="$1" table="$2" ext="$3"
+    ls "$dir" | grep -c "^$table\.part[0-9][0-9][0-9][0-9]\.$ext\$" || true
+}
+
+# The JSON parts of a split table joined into one array, as the unsplit export writes it: each part's "]" line is
+# dropped, a following part's leading "[" becomes ",", and empty parts ("[]") are skipped.
+join_parts() {
+    local dir="$1" table="$2"
+    LC_ALL=C awk 'FNR == 1 && $0 == "[]" { next }
+                  $0 == "]" { next }
+                  { printf "%s%s", (rows++ ? "\n," : "["), substr($0, 2) }
+                  END { printf "%s", (rows ? "\n]" : "[]") }' "$dir/$table".part[0-9][0-9][0-9][0-9].json
 }
 
 create_target_db() {
@@ -466,8 +491,260 @@ case "${1:-}" in
         cmp <(zcat "$gz/plain.Ref.json.gz") <(zcat "$res/plain.Ref.json.gz") || { echo "::error::Resumed plain.Ref differs"; exit 1; }
         ;;
 
+    split)
+        command -v jq >/dev/null || { echo "jq not found on PATH"; exit 1; }
+        src="$WORK/source-json"
+
+        # 1. Boundaries travel as text through CONVERT styles; each split column type must round-trip exactly.
+        sql -d BcpJsonSource -i "$HERE/convert_styles.sql"
+
+        # 2. JSON, every split table cut into 8 parts where it can be, from a snapshot.
+        sj="$WORK/split-json"
+        export_json BcpJsonSource "$sj" --include-schemas split --split-tables "split.*:8" --snapshot | tee "$WORK/split-json.log"
+        assert_no_snapshots
+        ls -l "$sj"
+        for t in Big NullKey Descending; do
+            n="$(part_count "$sj" "split.$t" json)"
+            [ "$n" = "8" ] || { echo "::error::split.$t has $n part files, expected 8"; exit 1; }
+        done
+        for t in Text Parted PartedHeap PartedCci; do
+            n="$(part_count "$sj" "split.$t" json)"
+            [ "$n" -ge 2 ] || { echo "::error::split.$t has $n part files, expected at least 2"; exit 1; }
+        done
+        [ -f "$sj/split.Heap.json" ] && [ "$(part_count "$sj" split.Heap json)" = "0" ] || { echo "::error::split.Heap was not exported as one file"; exit 1; }
+        grep -q "split.Heap: not split:" "$WORK/split-json.log" || { echo "::error::No 'not split' warning for split.Heap"; exit 1; }
+        bcpjson verify --path "$sj"
+        jq -e 'all(.tables[] | select(.split != null); .split.partCount == (.split.parts | length))' "$sj/$MANIFEST" > /dev/null \
+            || { echo "::error::A split table's manifest entry does not list all its parts"; cat "$sj/$MANIFEST"; exit 1; }
+        # Row counts per table match the unsplit export's manifest: no row lost or read twice.
+        diff <(jq -r '.tables[] | select(.name | startswith("split.")) | "\(.name) \(.rows)"' "$src/$MANIFEST") \
+             <(jq -r '.tables[] | "\(.name) \(.rows)"' "$sj/$MANIFEST") || { echo "::error::Split export row counts differ"; exit 1; }
+
+        # The parts joined in order equal the unsplit export where the split column leads the primary key (or the
+        # sort order); partitioned tables are split on Stamp but sorted by Id, so only their rows are compared.
+        joined="$WORK/split-joined"
+        rm -rf "$joined"
+        mkdir -p "$joined"
+        for t in Big Text NullKey Descending; do
+            join_parts "$sj" "split.$t" > "$joined/split.$t.json"
+            cmp "$joined/split.$t.json" "$src/split.$t.json" || { echo "::error::Joined parts of split.$t differ from the unsplit export"; exit 1; }
+        done
+        for t in Parted PartedHeap PartedCci; do
+            join_parts "$sj" "split.$t" > "$joined/split.$t.json"
+            diff <(normalize_rows "$joined/split.$t.json" | grep -v '^$') <(normalize_rows "$src/split.$t.json" | grep -v '^$') > /dev/null \
+                || { echo "::error::The parts of split.$t do not hold the rows of the unsplit export"; exit 1; }
+        done
+        echo "Joined parts equal the unsplit export (Big, Text, NullKey, Descending; Parted* ignoring order)."
+
+        # 3. BCP: queryout per part with the boundaries as typed literals, one shared format file.
+        sb="$WORK/split-bcp"
+        rm -rf "$sb"
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format bcp --export-path "$sb" \
+            --include-tables split.Big,split.Text,split.Descending,split.Parted --split-tables "split.*:4" | tee "$WORK/split-bcp.log"
+        ls -l "$sb"
+        [ "$(part_count "$sb" split.Big bcp)" = "4" ] || { echo "::error::split.Big has no 4 BCP parts"; exit 1; }
+        [ -f "$sb/split.Big-c.fmt" ] || { echo "::error::split.Big has no format file"; exit 1; }
+        # What bcp wrote to the parts' error logs (row errors, or only warnings).
+        for f in "$sb"/*_error.log; do
+            if [ -s "$f" ]; then
+                echo "--- $(basename "$f"):"
+                cat "$f"
+                echo
+            fi
+        done
+        bcpjson verify --path "$sb"
+        diff <(jq -r '.tables[] | select(.name == "split.Big" or .name == "split.Text" or .name == "split.Descending" or .name == "split.Parted") | "\(.name) \(.rows)"' "$src/$MANIFEST") \
+             <(jq -r '.tables[] | "\(.name) \(.rows)"' "$sb/$MANIFEST") || { echo "::error::Split BCP export row counts differ"; exit 1; }
+
+        # BCP parts name the columns the format file lists. bcp format leaves out the HIDDEN period columns of a temporal
+        # table, so the parts must too: every row has exactly the format file's fields.
+        sql -Q "DROP DATABASE IF EXISTS BcpJsonSplitOdd; CREATE DATABASE BcpJsonSplitOdd;"
+        sql -d BcpJsonSplitOdd -Q "CREATE TABLE dbo.Versioned (Id INT NOT NULL CONSTRAINT PK_Versioned PRIMARY KEY CLUSTERED, Val INT NOT NULL,
+            ValidFrom DATETIME2(7) GENERATED ALWAYS AS ROW START HIDDEN NOT NULL, ValidTo DATETIME2(7) GENERATED ALWAYS AS ROW END HIDDEN NOT NULL,
+            PERIOD FOR SYSTEM_TIME (ValidFrom, ValidTo)) WITH (SYSTEM_VERSIONING = ON (HISTORY_TABLE = dbo.VersionedHistory));"
+        sql -d BcpJsonSplitOdd -Q "SET NOCOUNT ON; INSERT dbo.Versioned (Id, Val) SELECT TOP (20000) ROW_NUMBER() OVER (ORDER BY (SELECT NULL)), 1 FROM sys.all_objects a CROSS JOIN sys.all_objects b; UPDATE STATISTICS dbo.Versioned WITH FULLSCAN;"
+        st="$WORK/split-temporal"
+        rm -rf "$st"
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSplitOdd --file-format bcp --export-path "$st" \
+            --include-tables dbo.Versioned --split-tables "dbo.Versioned:4" | tee "$WORK/split-temporal.log"
+        [ "$(part_count "$st" dbo.Versioned bcp)" = "4" ] || { echo "::error::dbo.Versioned has no 4 BCP parts"; exit 1; }
+        bcpjson verify --path "$st"
+        [ "$(jq '.tables[] | select(.name == "dbo.Versioned") | .rows' "$st/$MANIFEST")" = "20000" ] || { echo "::error::dbo.Versioned rows"; exit 1; }
+        fields="$(sed -n 2p "$st/dbo.Versioned-c.fmt" | tr -d '[:space:]')"
+        [ "$fields" = "2" ] || { echo "::error::Format file of dbo.Versioned lists $fields columns, expected 2 (hidden ones left out)"; exit 1; }
+        if cat "$st"/dbo.Versioned.part*.bcp | awk -F'|' -v n="$fields" 'NF != n { bad++ } END { exit bad > 0 ? 0 : 1 }'; then
+            echo "::error::BCP part rows do not have the format file's $fields fields"; exit 1
+        fi
+        echo "Temporal table: 4 BCP parts, 20,000 rows of $fields fields each."
+
+        # A sparse column set changes the columns a table returns, so such a table is not split (whatever the format)
+        # and is exported whole. It lives here, not in BcpJsonSource: imports cannot load a column set and its columns.
+        sql -d BcpJsonSplitOdd -Q "EXEC (N'CREATE SCHEMA split'); CREATE TABLE split.ColumnSet (Id INT NOT NULL CONSTRAINT PK_ColumnSet PRIMARY KEY CLUSTERED,
+            Code VARCHAR(10) NOT NULL, A INT SPARSE NULL, B NVARCHAR(20) SPARSE NULL, Props XML COLUMN_SET FOR ALL_SPARSE_COLUMNS);"
+        sql -d BcpJsonSplitOdd -Q "SET NOCOUNT ON; INSERT split.ColumnSet (Id, Code, A, B) SELECT TOP (300) n, CONCAT('c', n), CASE WHEN n % 2 = 0 THEN n END, CASE WHEN n % 3 = 0 THEN CONCAT(N'b', n) END
+            FROM (SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects) AS x; UPDATE STATISTICS split.ColumnSet WITH FULLSCAN;"
+        export_json BcpJsonSplitOdd "$WORK/split-columnset" --include-tables split.ColumnSet --split-tables "split.*:4" | tee "$WORK/split-columnset.log"
+        grep -qF "split.ColumnSet: not split: the table has a sparse column set." "$WORK/split-columnset.log" || { echo "::error::split.ColumnSet was not declined"; exit 1; }
+        [ -s "$WORK/split-columnset/split.ColumnSet.json" ] && [ "$(part_count "$WORK/split-columnset" split.ColumnSet json)" = "0" ] \
+            || { echo "::error::split.ColumnSet was not exported as one file"; ls -l "$WORK/split-columnset"; exit 1; }
+        echo "Sparse column set: not split, exported whole."
+        sql -Q "ALTER DATABASE BcpJsonSplitOdd SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE BcpJsonSplitOdd;"
+
+        # 4. --resume after losing one part, without --split-tables: the recorded split is kept and only that part redone.
+        res="$WORK/split-resume"
+        rm -rf "$res"
+        cp -r "$sj" "$res"
+        rm "$res/split.Big.part0003.json"
+        jq '.completed = null | .tables |= map(if .name == "split.Big" then (.split.parts |= map(select(.part != 3)) | .files |= map(select(.name != "split.Big.part0003.json"))) else . end)' \
+            "$sj/$MANIFEST" > "$res/$MANIFEST"
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format json --include-schemas split --export-path "$res" --resume | tee "$WORK/split-resume.log"
+        grep -qF "split.Big: --resume keeps its recorded split (8 parts)." "$WORK/split-resume.log" || { echo "::error::--resume did not keep the recorded split"; exit 1; }
+        grep -qF "split.Big: 1 part(s) to go." "$WORK/split-resume.log" || { echo "::error::--resume did not redo exactly one part"; exit 1; }
+        cmp "$sj/split.Big.part0003.json" "$res/split.Big.part0003.json" || { echo "::error::The redone part differs"; exit 1; }
+        bcpjson verify --path "$res"
+
+        # 5. Import the split JSON export: parts are grouped per table and load in parallel or one after another.
+        scalar() { sql -d "$1" -h -1 -W -Q "SET NOCOUNT ON; $2" | tr -d '[:space:]'; }
+        sjs="$WORK/source-json-split"
+        rm -rf "$sjs"
+        mkdir -p "$sjs"
+        cp "$src"/split.*.json "$sjs/"
+        # (a) Plain import: clustered targets load their parts in key order with an order hint each, heaps in parallel.
+        create_target_db BcpJsonSplit
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --max-tasks 4 --source-path "$sj" --source-file '*.json' | tee "$WORK/split-import.log"
+        grep -qF "split.Big: 8 parts, loading one after another (clustered index)." "$WORK/split-import.log" || { echo "::error::split.Big did not load its parts one after another"; exit 1; }
+        grep -qE "split\.PartedHeap: [0-9]+ parts, loading in parallel\." "$WORK/split-import.log" || { echo "::error::split.PartedHeap did not load its parts in parallel"; exit 1; }
+        grep -qE "split\.PartedCci: [0-9]+ parts, loading one after another \(columnstore\)\." "$WORK/split-import.log" || { echo "::error::split.PartedCci was not loaded one part after another"; exit 1; }
+        grep -qE "split\.Heap: [0-9,.]+ \(Import Complete\)" "$WORK/split-import.log" || { echo "::error::split.Heap was not imported"; exit 1; }
+        if grep -qE "split\.Heap: [0-9]+ parts" "$WORK/split-import.log"; then echo "::error::An unsplit table logged a load mode"; exit 1; fi
+        hints="$(grep -c "split.Big: Rows are in clustered index order; loading with an order hint." "$WORK/split-import.log" || true)"
+        [ "$hints" = "8" ] || { echo "::error::split.Big logged $hints order hints, expected one per part (8)"; exit 1; }
+        export_json BcpJsonSplit "$WORK/split-import" --include-schemas split
+        compare_exact "$sjs" "$WORK/split-import"
+
+        # (d) Parts into a target clustered on another key: no order hint, every row arrives.
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --source-path "$sj" --source-file 'split.Big.part*.json' --target-table split.BigOther | tee "$WORK/split-import-other.log"
+        if grep -q "Rows are in clustered index order" "$WORK/split-import-other.log"; then echo "::error::Order hint on a different clustered key"; exit 1; fi
+        [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.BigOther;")" = "200000" ] || { echo "::error::split.BigOther does not hold 200,000 rows"; exit 1; }
+        echo "split.BigOther: 200,000 rows from the parts of split.Big, no order hint."
+
+        # (f) --truncate-target empties a table once, before its first part: importing twice leaves 200,000 rows, not one part's.
+        for run in 1 2; do
+            bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --max-tasks 4 --truncate-target --source-path "$sj" --source-file 'split.Big.part*.json' | tee "$WORK/split-import-truncate.log"
+        done
+        [ "$(grep -c "split.Big: Truncate Complete." "$WORK/split-import-truncate.log")" = "1" ] || { echo "::error::split.Big was not truncated exactly once"; exit 1; }
+        [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.Big;")" = "200000" ] || { echo "::error::split.Big does not hold 200,000 rows after two truncating imports"; exit 1; }
+        echo "--truncate-target: one truncation per table, 200,000 rows."
+
+        # Two file names resolving to one table are refused (the second group's truncate would race the first's load).
+        two="$WORK/split-two-names"
+        rm -rf "$two"
+        mkdir -p "$two"
+        cp "$sj/split.Heap.json" "$two/"
+        cp "$sj/split.Heap.json" "$two/[split].[Heap].json"
+        if bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --truncate-target --source-path "$two" --source-file '*.json' > "$WORK/split-two-names.log" 2>&1; then
+            cat "$WORK/split-two-names.log"; echo "::error::Two files for one table were both accepted"; exit 1
+        fi
+        cat "$WORK/split-two-names.log"
+        grep -qF "both load into this table; import them separately." "$WORK/split-two-names.log" || { echo "::error::Two files for one table were not reported"; exit 1; }
+        [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.Heap;")" = "1000" ] || { echo "::error::split.Heap does not hold one file's 1,000 rows"; exit 1; }
+
+        # (g) Re-exporting into the same folder with fewer parts leaves parts 5-8 behind: export names them, and import
+        #     (guided by the new manifest) skips them, so no row is loaded twice. A typo in --split-tables is reported.
+        rx="$WORK/split-reexport"
+        export_json BcpJsonSource "$rx" --include-tables split.Big --split-tables "split.Big:8"
+        bcpjson export "${SOURCE[@]}" --source-database BcpJsonSource --file-format json --export-path "$rx" --include-tables split.Big \
+            --split-tables "split.Big:4,split.Bgi:2" | tee "$WORK/split-reexport.log"
+        grep -qF -- "--split-tables split.Bgi: no table matched." "$WORK/split-reexport.log" || { echo "::error::The unmatched --split-tables entry was not reported"; exit 1; }
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --max-tasks 4 --truncate-target --source-path "$rx" --source-file '*.json' | tee "$WORK/split-reexport-import.log"
+        for p in 5 6 7 8; do
+            f="split.Big.part000$p.json"
+            grep -qF "split.Big: $f is left from an earlier export; delete it (import ignores it while the manifest is present)." "$WORK/split-reexport.log" \
+                || { echo "::error::Export did not report the leftover $f"; exit 1; }
+            grep -qF "split.Big: skipping $f: not part of the export in" "$WORK/split-reexport-import.log" || { echo "::error::Import did not skip $f"; exit 1; }
+        done
+        [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.Big;")" = "200000" ] || { echo "::error::split.Big does not hold 200,000 rows after importing the re-export"; exit 1; }
+        echo "Re-export with fewer parts: leftovers reported and skipped, 200,000 rows."
+
+        # A whole-table file next to part files, without a manifest to tell them apart, is refused: nothing is loaded.
+        mixed="$WORK/split-mixed"
+        rm -rf "$mixed"
+        mkdir -p "$mixed"
+        cp "$sj/split.Big.part0001.json" "$src/split.Big.json" "$mixed/"
+        if bcpjson import "${TARGET[@]}" --target-database BcpJsonSplit --file-format json --truncate-target --source-path "$mixed" --source-file '*.json' > "$WORK/split-mixed.log" 2>&1; then
+            cat "$WORK/split-mixed.log"; echo "::error::A whole file mixed with part files was accepted"; exit 1
+        fi
+        cat "$WORK/split-mixed.log"
+        grep -qF "split.Big: both split.Big.json and part files are present; remove the files of the older export." "$WORK/split-mixed.log" \
+            || { echo "::error::The mix of whole and part files was not reported"; exit 1; }
+        [ "$(scalar BcpJsonSplit "SELECT COUNT(*) FROM split.Big;")" = "200000" ] || { echo "::error::split.Big was touched by the refused import"; exit 1; }
+        echo "Whole file mixed with part files: refused, table untouched."
+
+        # (b) --disable-indexes: nonclustered indexes (not the primary key) are disabled for the load and rebuilt after it.
+        create_target_db BcpJsonSplitIdx
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitIdx --file-format json --max-tasks 4 --disable-indexes --source-path "$sj" --source-file '*.json' | tee "$WORK/split-import-idx.log"
+        grep -qF "split.Big: Disabled indexes: IX_Big_Stamp, UX_Big_Code." "$WORK/split-import-idx.log" || { echo "::error::split.Big did not log its disabled indexes"; exit 1; }
+        grep -qF "split.Big: Rebuilt 2 index(es)." "$WORK/split-import-idx.log" || { echo "::error::split.Big did not log the rebuild"; exit 1; }
+        [ "$(scalar BcpJsonSplitIdx "SELECT COUNT(*) FROM sys.indexes WHERE is_disabled = 1;")" = "0" ] || { echo "::error::Indexes left disabled after --disable-indexes"; exit 1; }
+        export_json BcpJsonSplitIdx "$WORK/split-import-idx" --include-schemas split
+        compare_exact "$sjs" "$WORK/split-import-idx"
+
+        # (c) A unique index over duplicate values cannot be rebuilt: the import fails, names the index, and leaves the
+        #     primary key enabled.
+        sql -d BcpJsonSplitIdx -Q "TRUNCATE TABLE split.Descending; CREATE UNIQUE NONCLUSTERED INDEX UX_Dup ON split.Descending (Val);"
+        if bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitIdx --file-format json --disable-indexes --truncate-target --source-path "$sj" --source-file 'split.Descending.part*.json' > "$WORK/split-import-dup.log" 2>&1; then
+            cat "$WORK/split-import-dup.log"; echo "::error::The import succeeded although UX_Dup could not be rebuilt"; exit 1
+        fi
+        cat "$WORK/split-import-dup.log"
+        grep -qE "split\.Descending: Could not rebuild index UX_Dup: .*duplicate key.* It is still disabled; run ALTER INDEX \[UX_Dup\] ON \[split\]\.\[Descending\] REBUILD\.$" "$WORK/split-import-dup.log" || { echo "::error::The failed rebuild of UX_Dup was not reported"; exit 1; }
+        [ "$(scalar BcpJsonSplitIdx "SELECT CONCAT(is_disabled, '/', (SELECT is_disabled FROM sys.indexes WHERE name = N'UX_Dup')) FROM sys.indexes WHERE name = N'PK_Descending';")" = "0/1" ] \
+            || { echo "::error::Expected PK_Descending enabled and UX_Dup disabled"; exit 1; }
+        [ "$(scalar BcpJsonSplitIdx "SELECT COUNT(*) FROM split.Descending;")" = "20000" ] || { echo "::error::split.Descending rows"; exit 1; }
+        echo "Unique index over duplicates: reported, left disabled; the primary key stays enabled."
+
+        # (e) BCP parts: each part is a bcp in with the table's shared format file and logs named after the part.
+        create_target_db BcpJsonSplitBcp
+        bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitBcp --file-format bcp --max-tasks 4 --source-path "$sb" --source-file '*.bcp' | tee "$WORK/split-import-bcp.log"
+        grep -qF "split.Big: 4 parts, loading one after another (clustered index)." "$WORK/split-import-bcp.log" || { echo "::error::split.Big BCP parts did not load one after another"; exit 1; }
+        [ -f "$sb/split.Big.part0001_import_output.log" ] || { echo "::error::No import log named after the part"; ls "$sb"; exit 1; }
+        sbs="$WORK/source-json-split-bcp"
+        rm -rf "$sbs"
+        mkdir -p "$sbs"
+        for t in Big Text Descending Parted; do cp "$src/split.$t.json" "$sbs/"; done
+        export_json BcpJsonSplitBcp "$WORK/split-import-bcp" --include-tables split.Big,split.Text,split.Descending,split.Parted
+        compare_exact "$sbs" "$WORK/split-import-bcp"
+
+        # 6. Copy: each part is its own source-to-target stream. Created targets are heaps until the load ends, so the
+        #    parts load in parallel and the indexes are built afterwards.
+        create_empty_db BcpJsonSplitCopy
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy --max-tasks 4 \
+            --include-schemas split --split-tables "split.*:4" --snapshot | tee "$WORK/split-copy.log"
+        assert_no_snapshots
+        grep -qF "split.Big: 4 parts, loading in parallel." "$WORK/split-copy.log" || { echo "::error::split.Big was not copied in parallel parts"; exit 1; }
+        [ "$(scalar BcpJsonSplitCopy "SELECT COUNT(*) FROM sys.indexes WHERE name = N'IX_Big_Stamp' AND object_id = OBJECT_ID(N'split.Big');")" = "1" ] \
+            || { echo "::error::IX_Big_Stamp was not created after the split copy"; exit 1; }
+        export_json BcpJsonSplitCopy "$WORK/split-copy" --include-schemas split
+        compare_exact "$sjs" "$WORK/split-copy"
+
+        # Into the existing tables with --truncate-target: split.Big now has its clustered primary key, so its parts
+        # load one after another.
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy --max-tasks 4 \
+            --include-schemas split --split-tables "split.*:4" --snapshot --truncate-target | tee "$WORK/split-copy-truncate.log"
+        grep -qF "split.Big: 4 parts, loading one after another (clustered index)." "$WORK/split-copy-truncate.log" \
+            || { echo "::error::split.Big was not copied one part after another into its clustered target"; exit 1; }
+        export_json BcpJsonSplitCopy "$WORK/split-copy-truncate" --include-schemas split
+        compare_exact "$sjs" "$WORK/split-copy-truncate"
+
+        # A table copied through bcp (CLR types) is never split.
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy \
+            --include-tables plain.Spatial --split-tables "plain.*:2" | tee "$WORK/split-copy-clr.log"
+        grep -qF "plain.Spatial: not split: copied through bcp (geography/geometry/hierarchyid columns)." "$WORK/split-copy-clr.log" \
+            || { echo "::error::plain.Spatial was not reported as not split"; exit 1; }
+        echo "Split copy: parallel parts into new heaps, one after another into clustered targets, CLR tables unsplit."
+        ;;
+
     *)
-        echo "usage: $0 setup|json|bcp|copy|snapshot|consistency|resilience|compression" >&2
+        echo "usage: $0 setup|json|bcp|copy|snapshot|consistency|resilience|compression|split" >&2
         exit 2
         ;;
 esac
