@@ -41,6 +41,13 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Options_of_other_commands_in_code_blocks_are_ignored()
+        {
+            var options = DocsFiles.CodeSpanOptions("```\ngit diff --no-index a b\nbcpjson export --source-database Sales `\n    --snapshot\nsqlcmd -S x --other\n```\n").ToList();
+            Assert.Equal(new[] { "--source-database", "--snapshot" }, options);
+        }
+
+        [Fact]
         public void Relative_links_and_anchors_resolve()
         {
             var failures = new List<string>();
@@ -232,10 +239,27 @@ namespace bcpJson.Tests
             return anchors;
         }
 
+        /// <summary>
+        /// Every --name inside inline code spans, and inside fenced code blocks on bcpjson command lines only (a line starting
+        /// with "bcpjson", and its continuation lines after a trailing ` or \); other commands' flags (git, sqlcmd) are not ours.
+        /// </summary>
         internal static IEnumerable<string> CodeSpanOptions(string markdown)
         {
+            bool inCommand = false;
             foreach ((string line, bool inFence) in Lines(markdown))
             {
+                if (inFence)
+                {
+                    string trimmed = line.Trim();
+                    bool continued = inCommand;
+                    inCommand = trimmed.StartsWith("bcpjson ", StringComparison.Ordinal) || (continued && trimmed.Length > 0);
+                    bool collect = inCommand;
+                    inCommand = inCommand && (trimmed.EndsWith('`') || trimmed.EndsWith('\\'));
+                    if (!collect)
+                    {
+                        continue;
+                    }
+                }
                 IEnumerable<string> code = inFence ? new[] { line } : InlineCode.Matches(line).Select(m => m.Value);
                 foreach (string part in code)
                 {
