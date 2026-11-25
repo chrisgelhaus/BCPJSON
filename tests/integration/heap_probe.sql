@@ -27,6 +27,7 @@ GO
     ALTER INDEX IX_CaseA_Name ON dbo.CaseA DISABLE;
     ALTER INDEX UX_CaseA_Code ON dbo.CaseA DISABLE;
     ALTER TABLE dbo.CaseA DROP CONSTRAINT PK_CaseA;
+    SELECT 'DIAG' AS tag, name, index_id, type_desc, is_disabled FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.CaseA');
 
     IF (SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.CaseA') AND name IN (N'IX_CaseA_Name', N'UX_CaseA_Code') AND is_disabled = 1) <> 2
         THROW 50000, 'A: both nonclustered indexes should still exist and be disabled after dropping the primary key', 1;
