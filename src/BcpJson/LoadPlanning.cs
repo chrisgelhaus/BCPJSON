@@ -8,6 +8,14 @@
     /// <summary>One index of the target (sys.indexes), as needed to decide what --disable-indexes disables.</summary>
     public sealed record IndexInfo(int IndexId, string Name, byte Type, bool IsPrimaryKey, bool IsDisabled, bool ReferencedByForeignKey, bool IsSecondaryXml);
 
+    /// <summary>Catalog facts about one target, read once at planning (null name = none).</summary>
+    public sealed record HeapLoadFacts(bool ClusteredRowstore, bool ClusteredColumnstore, bool MemoryOptimized,
+        string ReferencingForeignKey, string XmlOrSpatialIndex, string DisabledIndex, string IndexedView, bool Temporal,
+        bool ChangeTracking, bool Replicated, bool ChangeDataCapture, bool Filestream, bool FullText, bool Empty);
+
+    /// <summary>LoadAsHeap true: drop and reload. False with Reason null: nothing to say (heap target). False with Reason: warn.</summary>
+    public sealed record HeapLoadDecision(bool LoadAsHeap, string Reason);
+
     /// <summary>Pure rules for loading the parts of a table: parallel or sequential, and which indexes to disable.</summary>
     internal static class LoadPlanning
     {
@@ -23,6 +31,34 @@
             if (shape.EnabledNonclusteredIndexes > 0) return "enabled nonclustered indexes";
             if (shape.ClusteredColumnstore && !ClusteredColumnstoreLoadsInParallel) return "columnstore";
             return null;
+        }
+
+        /// <summary>Longest index CREATE statement (characters) that load-as-heap will script.</summary>
+        internal const int MaxIndexStatementLength = 3500;
+
+        /// <summary>Whether --load-as-heap applies to a target; the first failing check names the reason.</summary>
+        internal static HeapLoadDecision DecideHeapLoad(HeapLoadFacts facts, bool tableLock, bool stagedClrColumns,
+            bool truncateTarget, string tooLongIndex)
+        {
+            if (!facts.ClusteredRowstore && !facts.ClusteredColumnstore) return new HeapLoadDecision(false, null);
+            string reason = null;
+            if (!tableLock) reason = "--no-table-lock";
+            else if (stagedClrColumns) reason = "CLR columns";
+            else if (facts.MemoryOptimized) reason = "memory-optimized";
+            else if (facts.ClusteredColumnstore) reason = "clustered columnstore";
+            else if (facts.ReferencingForeignKey != null) reason = "referenced by foreign key " + facts.ReferencingForeignKey;
+            else if (facts.XmlOrSpatialIndex != null) reason = "XML or spatial index " + facts.XmlOrSpatialIndex;
+            else if (facts.DisabledIndex != null) reason = "disabled index " + facts.DisabledIndex;
+            else if (facts.IndexedView != null) reason = "indexed view " + facts.IndexedView;
+            else if (facts.Temporal) reason = "temporal table";
+            else if (facts.ChangeTracking) reason = "change tracking";
+            else if (facts.Replicated) reason = "replication";
+            else if (facts.ChangeDataCapture) reason = "change data capture";
+            else if (facts.Filestream) reason = "FILESTREAM";
+            else if (facts.FullText) reason = "full-text index";
+            else if (!truncateTarget && !facts.Empty) reason = "not empty";
+            else if (tooLongIndex != null) reason = "index definition too long: " + tooLongIndex;
+            return new HeapLoadDecision(reason == null, reason);
         }
 
         internal static LoadMode ChooseLoadMode(TargetShape shape, bool tableLock, bool stagedClrColumns)

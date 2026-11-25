@@ -67,7 +67,8 @@ namespace bcpJson
         internal static bool IsImportableFile(string name)
         {
             return !name.Equals(ExportManifest.FileName, StringComparison.OrdinalIgnoreCase)
-                && !name.EndsWith(PartialSuffix, StringComparison.OrdinalIgnoreCase);
+                && !name.EndsWith(PartialSuffix, StringComparison.OrdinalIgnoreCase)
+                && !name.EndsWith(HeapLoadScript.Suffix, StringComparison.OrdinalIgnoreCase);
         }
 
         private static FileInfo[] FindSourceFiles(ImportOptions options)

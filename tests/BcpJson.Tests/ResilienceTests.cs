@@ -155,6 +155,8 @@ namespace bcpJson.Tests
         [InlineData("bcpjson-manifest.json", false)]
         [InlineData("BCPJSON-MANIFEST.JSON", false)]
         [InlineData("dbo.T.json.partial", false)]
+        [InlineData("split.Big.load-as-heap.sql", false)]
+        [InlineData("split.Big.part0001.json", true)]
         public void Import_skips_manifest_and_partial_files(string name, bool importable)
         {
             Assert.Equal(importable, Program.IsImportableFile(name));
