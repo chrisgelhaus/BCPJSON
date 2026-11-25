@@ -47,6 +47,9 @@ namespace bcpJson
         [Option("disable-indexes", Default = false, Required = false, HelpText = "Disable nonclustered indexes (except the primary key and indexes used by foreign keys) during the load and rebuild them afterwards.")]
         public bool DisableIndexes { get; set; }
 
+        [Option("load-as-heap", Default = false, Required = false, HelpText = "For split tables loaded into a table with a clustered index: drop its indexes, load the parts in parallel into the heap, then recreate the indexes. Other tables load as with --disable-indexes.")]
+        public bool LoadAsHeap { get; set; }
+
         [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries when opening a connection fails transiently (network error, failover, throttling), with exponential backoff. Loads themselves are not retried. 0 = no retries.")]
         public int Retries { get; set; }
 
