@@ -164,6 +164,10 @@ jobs:
             mkdir -p "stage/$name"
             cp "$dir"/* "stage/$name/"
             cp LICENSE NOTICE README.md "stage/$name/"
+            mkdir -p "stage/$name/docs" && cp -r docs/guides docs/reference "stage/$name/docs/"
+            for f in README.md docs/guides/restore-an-export.md docs/reference/export.md; do
+              if [ ! -f "stage/$name/$f" ]; then echo "::error::$name is missing $f"; exit 1; fi
+            done
             if [[ "$rid" == win-* ]]; then
               (cd stage && zip -qr "../dist/$name.zip" "$name")
             else
