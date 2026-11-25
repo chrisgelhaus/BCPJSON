@@ -773,11 +773,18 @@ case "${1:-}" in
             cat "$WORK/split-heap-failed.log"; echo "::error::The import with a broken part succeeded"; exit 1
         fi
         cat "$WORK/split-heap-failed.log"
+        grep -qF "split.Big: 4 index(es) dropped; loading 8 parts in parallel as a heap." "$WORK/split-heap-failed.log" \
+            || { echo "::error::split.Big was not loaded as a heap in the failed load"; exit 1; }
+        grep -qF "split.Big.part0003.json: " "$WORK/split-heap-failed.log" || { echo "::error::The failure did not come from the cut part0003"; exit 1; }
+        grep -qF "split.Big: clustered index PK_Big and 3 other index(es) recreated." "$WORK/split-heap-failed.log" \
+            || { echo "::error::The indexes of split.Big were not recreated after the failed load"; exit 1; }
+        # The other 7 parts (175,000 rows) load; the cut part fails within its first batch (--batch-size 50,000 > 25,000 rows).
+        [ "$(scalar BcpJsonSplitHeap "SELECT COUNT(*) FROM split.Big;")" = "175000" ] || { echo "::error::split.Big does not hold the 175,000 rows of the 7 intact parts"; exit 1; }
         diff -u <(grep '^split\.Big |' "$WORK/heap-indexes-before.txt") <(heap_indexes BcpJsonSplitHeap | grep '^split\.Big |') \
             || { echo "::error::split.Big's indexes differ after the failed load"; exit 1; }
         if ls "$hf"/*.load-as-heap.sql > /dev/null 2>&1; then echo "::error::A recovery script was left after the failed load"; ls -l "$hf"; exit 1; fi
         [ "$(markers BcpJsonSplitHeap)" = "0" ] || { echo "::error::The failed load left markers behind"; exit 1; }
-        echo "Load as heap (e): failed load, indexes of split.Big recreated, no script, no markers."
+        echo "Load as heap (e): heap load with a cut part failed, 175,000 rows, indexes of split.Big recreated, no script, no markers."
 
         # (f) Duplicate key: the clustered primary key cannot be recreated; the script and the markers stay, and the next
         #     import is refused until they are dealt with.
