@@ -31,3 +31,5 @@ How-to: [Recover a failed run](../guides/recover-a-failed-run.md#verify-an-expor
 - leftover `.partial` files.
 
 Run it after copying an export to archive storage, and before restoring from it. Compressed exports are checked the same way, against the `.gz` files.
+
+<!-- CI docs-only test; this PR is closed without merging. -->
