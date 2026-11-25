@@ -62,7 +62,59 @@ namespace bcpJson.Tests
                     }
                 }
             }
-            Assert.Empty(failures);
+            Assert.True(failures.Count == 0, "Broken links:\n" + string.Join("\n", failures));
+        }
+
+        public static TheoryData<Type, string> Verbs => new()
+        {
+            { typeof(ExportOptions), "export.md" },
+            { typeof(ImportOptions), "import.md" },
+            { typeof(CopyOptions), "copy.md" },
+            { typeof(VerifyOptions), "verify.md" },
+        };
+
+        private static IEnumerable<CommandLine.OptionAttribute> OptionsOf(Type options)
+        {
+            return options.GetProperties()
+                .Select(p => p.GetCustomAttributes(typeof(CommandLine.OptionAttribute), false).Cast<CommandLine.OptionAttribute>().FirstOrDefault())
+                .Where(a => a != null);
+        }
+
+        [Theory, MemberData(nameof(Verbs))]
+        public void Every_option_is_documented_on_its_verb_page(Type options, string page)
+        {
+            string path = Path.Combine(DocsFiles.RepoRoot(), "docs", "reference", page);
+            string text = File.Exists(path) ? File.ReadAllText(path) : "";
+            var missing = OptionsOf(options)
+                .Select(a => string.IsNullOrEmpty(a.LongName) ? "-" + a.ShortName : "--" + a.LongName)
+                .Where(name => !text.Contains("`" + name + "`", StringComparison.Ordinal))
+                .ToList();
+            Assert.True(missing.Count == 0, page + " does not document: " + string.Join(", ", missing));
+        }
+
+        [Fact]
+        public void Every_documented_option_exists()
+        {
+            var known = new HashSet<string>(StringComparer.Ordinal) { "--help", "--version" };
+            foreach (Type options in new[] { typeof(ExportOptions), typeof(ImportOptions), typeof(CopyOptions), typeof(VerifyOptions) })
+            {
+                foreach (var a in OptionsOf(options).Where(a => !string.IsNullOrEmpty(a.LongName)))
+                {
+                    known.Add("--" + a.LongName);
+                }
+            }
+            string root = DocsFiles.RepoRoot();
+            var unknown = new List<string>();
+            foreach (string folder in new[] { "guides", "reference" })
+            {
+                string path = Path.Combine(root, "docs", folder);
+                foreach (string file in Directory.Exists(path) ? Directory.GetFiles(path, "*.md") : Array.Empty<string>())
+                {
+                    unknown.AddRange(DocsFiles.CodeSpanOptions(File.ReadAllText(file)).Where(o => !known.Contains(o))
+                        .Distinct().Select(o => Path.GetFileName(file) + ": " + o));
+                }
+            }
+            Assert.Empty(unknown);
         }
     }
 }
