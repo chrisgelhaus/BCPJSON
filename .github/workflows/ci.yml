@@ -21,6 +21,44 @@ env:
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
 
 jobs:
+  # Decides whether the SQL Server round trips are needed. A pull request that changes only documentation
+  # (Markdown files, docs/, LICENSE, NOTICE) skips them: the round-trip jobs still run and report success, so the
+  # required checks keep their names, but they start no SQL Server container and skip every step. Pushes to
+  # master, manual runs and release builds (workflow_call) always run everything. The build job always runs:
+  # its unit tests include DocsTests, which check the docs.
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+
+      - name: Anything besides documentation?
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "Not a pull request: running everything."
+            exit 0
+          fi
+          files="$(git diff --name-only "$BASE" HEAD)"
+          echo "Changed files:"; echo "$files"
+          other="$(echo "$files" | grep -vE '(\.md$|^docs/|^LICENSE$|^NOTICE$)' || true)"
+          if [ -n "$other" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "Not documentation only (for example $(echo "$other" | head -1)): running the round trips."
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Documentation-only change: the SQL Server round trips are skipped."
+          fi
+
   build:
     name: Build and unit test (${{ matrix.os }})
     strategy:
@@ -56,7 +94,7 @@ jobs:
     # Branch protection requires these checks by name ("Round trip against SQL Server 2022" etc.);
     # renaming the job or a version means updating the required checks too.
     name: Round trip against SQL Server ${{ matrix.sql }}
-    needs: build
+    needs: [build, changes]
     strategy:
       fail-fast: false
       matrix:
@@ -72,7 +110,8 @@ jobs:
       # roundtrip.sh writes to $RUNNER_TEMP/bcpjson-roundtrip
     services:
       mssql:
-        image: mcr.microsoft.com/mssql/server:${{ matrix.sql }}-latest
+        # An empty image starts no container (documentation-only changes, see the changes job).
+        image: ${{ needs.changes.outputs.code == 'true' && format('mcr.microsoft.com/mssql/server:{0}-latest', matrix.sql) || '' }}
         env:
           ACCEPT_EULA: "Y"
           MSSQL_SA_PASSWORD: BcpJson-CI-2026x
@@ -80,22 +119,33 @@ jobs:
         ports:
           - 1433:1433
     steps:
+      - name: Documentation-only change
+        if: needs.changes.outputs.code != 'true'
+        run: echo "Only documentation changed; no round trip needed."
+
+      # The steps below that have no condition of their own run only when code changed. The later steps
+      # depend on "setup", which is skipped otherwise, so they are skipped too.
       - uses: actions/checkout@v7
+        if: needs.changes.outputs.code == 'true'
 
       - uses: actions/setup-dotnet@v6
+        if: needs.changes.outputs.code == 'true'
         with:
           dotnet-version: 8.0.x
 
       - name: Publish linux-x64 single-file executable
+        if: needs.changes.outputs.code == 'true'
         run: |
           dotnet publish src/BcpJson/BcpJson.csproj -c Release -r linux-x64 -o publish
           ls -l publish
           ./publish/bcpjson --version
 
       - name: Install sqlcmd and bcp
+        if: needs.changes.outputs.code == 'true'
         run: bash tests/integration/install-mssql-tools.sh
 
       - name: Wait for SQL Server
+        if: needs.changes.outputs.code == 'true'
         run: |
           for i in $(seq 1 60); do
             if sqlcmd -S "$SQL_SERVER" -U sa -P "$SQL_PASSWORD" -C -Q "SELECT 1" -b -o /dev/null; then
@@ -110,6 +160,7 @@ jobs:
 
       - name: Create and export the source database
         id: setup
+        if: needs.changes.outputs.code == 'true'
         run: bash tests/integration/roundtrip.sh setup
 
       - name: Bulk load lock modes
