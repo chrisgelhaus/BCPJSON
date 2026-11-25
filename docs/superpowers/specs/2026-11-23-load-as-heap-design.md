@@ -1,6 +1,6 @@
 ﻿# Loading split tables as heaps (`import --load-as-heap`)
 
-Status: approved 2026-11-23; revised 2026-11-24 after the CI probe (owner chose to drop every index, see "Revision"). Follows `2026-11-23-key-range-splitting-design.md`, which deferred this as "option 2".
+Status: implemented in PR #48 (see "As built" at the end); approved 2026-11-23; revised 2026-11-24 after the CI probe (owner chose to drop every index, see "Revision"). Follows `2026-11-23-key-range-splitting-design.md`, which deferred this as "option 2".
 
 ## Why
 
@@ -160,3 +160,20 @@ Not decided by the owner; correct any of them.
 ## Revision (2026-11-24)
 
 The first version disabled the nonclustered indexes and dropped only the clustered index. The CI probe showed that dropping a clustered index rebuilds and re-enables disabled nonclustered indexes on SQL Server 2019, 2022 and 2025 (run 45540422748). The owner chose to drop and recreate every index instead (approach 1 above); the probe was removed, as nothing depends on that behaviour any more.
+
+## As built
+
+Where the implementation differs from the text above (the code and README win):
+
+- **The recovery script is written at planning**, in `PlanHeapLoad`, not in "before" (section 3, step 3): "cannot write" is a planning-time fallback, which needs the write attempt then. "Before" deletes the script when it refuses because rows were added.
+- **The script is rerunnable (section 5, as revised).** Each index statement sits in `IF NOT EXISTS (SELECT 1 FROM sys.indexes ...) BEGIN ... END`, then each marker is dropped if present. It has no `SET QUOTED_IDENTIFIER ON`, so it must be run with `sqlcmd -I` or another tool with `QUOTED_IDENTIFIER ON` (filtered indexes need it).
+- **Interrupted-run message wording** is the one in section 5 as revised: "...run the script in {file} (it recreates what is missing and removes the markers; if the file is lost, the statements are in the extended properties bcpjson_load_as_heap_*, drop those after running them), then import again." `{file}` is built from the current `--source-path`, which may not be the folder the script was written to.
+- **No success line when nothing was created.** `{table}: clustered index {name} and {k} other index(es) recreated.` is posted only if "after" created at least one index; when "before" stopped ahead of the drop, markers and script are cleaned up silently. For a table with one index it reads "and 0 other index(es)".
+- **An SMO scripting failure is an error that skips the table**; it is not a fallback reason. A failure to write the script is a fallback (`cannot write {path}: {message}`), and the message keeps the exception's own full stop (`...denied.; disabling indexes instead.`).
+- **"Rows were added" is reported per part.** The exception thrown in "before" goes through `TableWork`, so it is posted as `{table}: preparation failed: {table}: rows were added after planning; not loaded.` once per part file.
+- **Two messages not in the design:** `{table}: every index exists, but its extended properties bcpjson_load_as_heap_* could not be removed: {reason}. Remove them before the next import.` (error) and `Could not delete {path}: {message}` (warning).
+- **Reason order:** `DecideHeapLoad` checks `--no-table-lock`, `CLR columns` and `memory-optimized` before `clustered columnstore`, and skips `not empty` with `--truncate-target`. A target with neither a clustered rowstore nor a clustered columnstore index is a heap: no message, no change. A foreign key counts when it references the table at all (self-references included), not only a key or unique index.
+- **Fallback tables** use the `--disable-indexes` logic under `--load-as-heap` too, so a memory-optimized fallback also logs `{table}: memory-optimized; --disable-indexes ignored.` The "left over" warning can be posted for a table that this run then plans as a heap and overwrites the file of.
+- **Extra connections:** SMO scripting opens its own connection per planned table (a probe connection too when `--target-database` is not given); it runs only after every other rule has passed.
+- **CI as built:** case (i) imports into `BcpJsonSplitHeapBcp` with `--truncate-target` and without `--load-as-heap` (in `BcpJsonSplitHeap`, split.Text is referenced by a foreign key, so TRUNCATE is refused); case (c) exports with `--exclude-tables split.TextRef`; case (f) imports from a copy of the Descending parts so the script stays out of the shared folder. The recovery script is never executed in CI. Unit tests cover `DecideHeapLoad`, the script text and names and `IsImportableFile`; "before" and "after" are proven only by `roundtrip.sh split`.
+- **Benchmark:** `benchmark.sh` has the row "import indexed, --load-as-heap" (database `BenchE`); it has not been run, because `benchmark.yml` can be dispatched only from master. The numbers in "Why" come from the hand-made sequence.
