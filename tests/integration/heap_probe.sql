@@ -22,7 +22,7 @@ GO
     INSERT dbo.CaseA (Id, Name, Code)
     SELECT TOP (1000) n, CONCAT('n', n), n
     FROM (SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b) x
-    ORDER BY n;
+    ORDER BY x.n;
 
     ALTER INDEX IX_CaseA_Name ON dbo.CaseA DISABLE;
     ALTER INDEX UX_CaseA_Code ON dbo.CaseA DISABLE;
@@ -36,7 +36,7 @@ GO
     INSERT dbo.CaseA (Id, Name, Code)
     SELECT TOP (1000) 1000 + n, CONCAT('n', 1000 + n), 1000 + n
     FROM (SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b) x
-    ORDER BY n;
+    ORDER BY x.n;
 
     ALTER TABLE dbo.CaseA ADD CONSTRAINT PK_CaseA PRIMARY KEY CLUSTERED (Id);
 
@@ -59,7 +59,7 @@ GO
     INSERT dbo.CaseB (Id, Name)
     SELECT TOP (1000) n, CONCAT('n', n)
     FROM (SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b) x
-    ORDER BY n;
+    ORDER BY x.n;
 
     ALTER INDEX PK_CaseB ON dbo.CaseB DISABLE;
     DROP INDEX CX_CaseB_Name ON dbo.CaseB;
@@ -70,7 +70,7 @@ GO
     INSERT dbo.CaseB (Id, Name)
     SELECT TOP (1000) 1000 + n, CONCAT('n', 1000 + n)
     FROM (SELECT ROW_NUMBER() OVER (ORDER BY (SELECT NULL)) AS n FROM sys.all_objects a CROSS JOIN sys.all_objects b) x
-    ORDER BY n;
+    ORDER BY x.n;
 
     CREATE CLUSTERED INDEX CX_CaseB_Name ON dbo.CaseB (Name);
 
