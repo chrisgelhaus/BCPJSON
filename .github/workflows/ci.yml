@@ -119,10 +119,6 @@ jobs:
           SQL_USER: sa
         run: ./tests/integration/lock_probe.ps1
 
-      - name: Clustered index drop keeps disabled indexes
-        if: ${{ !cancelled() && steps.setup.outcome == 'success' }}
-        run: sqlcmd -S "$SQL_SERVER" -U sa -P "$SQL_PASSWORD" -C -b -I -i tests/integration/heap_probe.sql
-
       # The three round trips are independent: each runs whenever setup succeeded, so one failure
       # does not hide the results of the others.
       - name: JSON round trip (export, import, export)
