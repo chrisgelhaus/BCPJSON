@@ -72,6 +72,29 @@ namespace bcpJson.Tests
             Assert.True(failures.Count == 0, "Broken links:\n" + string.Join("\n", failures));
         }
 
+        [Fact]
+        public void User_docs_link_only_to_shipped_files()
+        {
+            string root = DocsFiles.RepoRoot();
+            string guides = Path.Combine(root, "docs", "guides") + Path.DirectorySeparatorChar;
+            string reference = Path.Combine(root, "docs", "reference") + Path.DirectorySeparatorChar;
+            var shipped = new HashSet<string>(new[] { "LICENSE", "NOTICE", "README.md" }.Select(n => Path.Combine(root, n)), StringComparer.OrdinalIgnoreCase);
+            var offenders = new List<string>();
+            foreach (string file in DocsFiles.DocFiles().Where(f => !f.EndsWith("CONTRIBUTING.md", StringComparison.OrdinalIgnoreCase)))
+            {
+                foreach ((string target, string _) in DocsFiles.RelativeLinks(File.ReadAllText(file)).Where(l => l.Target.Length > 0))
+                {
+                    string path = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(file), Uri.UnescapeDataString(target)));
+                    if (!shipped.Contains(path) && !path.StartsWith(guides, StringComparison.OrdinalIgnoreCase)
+                        && !path.StartsWith(reference, StringComparison.OrdinalIgnoreCase))
+                    {
+                        offenders.Add(Path.GetRelativePath(root, file) + ": " + target);
+                    }
+                }
+            }
+            Assert.True(offenders.Count == 0, "Links to files that are not in the release package (use a GitHub URL):\n" + string.Join("\n", offenders));
+        }
+
         public static TheoryData<Type, string> Verbs => new()
         {
             { typeof(ExportOptions), "export.md" },
