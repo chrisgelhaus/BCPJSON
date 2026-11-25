@@ -57,7 +57,7 @@ Handoff notes so any Claude session (chat, web or terminal) can pick up where th
 
 ## Done after v2.6.0 (PR #45, key-range splitting of large tables; released in v2.7.0)
 
-Design: `docs/superpowers/specs/2026-11-23-key-range-splitting-design.md` (with an "As built" section). Documented in the README, "Splitting large tables".
+Design: `docs/superpowers/specs/2026-11-23-key-range-splitting-design.md` (with an "As built" section). Documented in `docs/guides/large-tables.md`.
 
 - **`--split-tables pattern[:parts]`** on `export` (JSON and BCP) and `copy`: chosen tables are cut into 2-200 key ranges (default 8) handled as parallel tasks; unnamed tables produce exactly the old files. Ranges come from partition boundaries (partitioned tables) or the clustered key's statistics histogram, interpolated inside steps for number and date/time keys. Tables that cannot be split are exported whole with a warning.
 - **Parts:** `<schema>.<table>.part0001.<ext>[.gz]`; the manifest keeps one entry per table with a `split` object; `verify` reports missing parts; `--resume` and retries work part by part.
@@ -67,14 +67,21 @@ Design: `docs/superpowers/specs/2026-11-23-key-range-splitting-design.md` (with 
 
 ## Done after v2.7.0 (`import --load-as-heap`, PR #48; released in v2.8.0)
 
-Design: `docs/superpowers/specs/2026-11-23-load-as-heap-design.md` (with an "As built" section). Documented in the README, "Splitting large tables".
+Design: `docs/superpowers/specs/2026-11-23-load-as-heap-design.md` (with an "As built" section). Documented in `docs/guides/large-tables.md` and `docs/guides/recover-a-failed-run.md`.
 
 - **`import --load-as-heap`** (JSON and BCP, split tables only): drops every index of a table with a clustered index, loads the parts in parallel into the heap, then recreates the clustered index and the others, also after a failed load. Tables that do not qualify fall back to `--disable-indexes` with `not loaded as a heap: <reason>`. Benchmark (5,000,000 rows): 53.9 s indexed, 30.1 s `--disable-indexes`, 20.4 s heap load plus index builds.
 - **Why every index is dropped:** the first design disabled the nonclustered indexes and dropped only the clustered one. A CI probe (run 45540422748) showed that dropping a clustered index rebuilds and re-enables disabled nonclustered indexes on SQL Server 2019, 2022 and 2025, so the owner chose to drop and recreate all of them.
 - **Safety net:** a rerunnable recovery script `<schema>.<table>.load-as-heap.sql` in `--source-path` (written at planning) and one `bcpjson_load_as_heap_NNN` extended property per index on the table; every import refuses a marked table. Both are removed when all indexes exist again. The script sets its own session options and drops the markers only when every index exists.
 - **CI:** `roundtrip.sh split` cases (a) to (i) on SQL Server 2019, 2022 and 2025: index definitions identical before and after (`heap_indexes.sql`), BCP parts, a failed load, duplicate keys in the clustered and in a unique index, `--target-table`, an unwritable folder, a leftover script, and the recovery script run by sqlcmd (markers kept while the key fails, removed once it succeeds).
-- **Follow-ups after v2.8.0 (PR #49, released in v2.8.1):** the recovery script checks `DB_NAME()` in every batch and says so when it runs in another database (renamed or restored target); control characters in names no longer reach its comments; README recommends `sqlcmd -x`. CI now proves the script's own `SET QUOTED_IDENTIFIER ON` (a filtered index recreated by sqlcmd without `-I`), the wrong-database refusal, and that a hypothetical index is skipped. `benchmark.sh` has the row `import indexed, --load-as-heap`; it has not been run (the workflow runs only from master).
+- **Follow-ups after v2.8.0 (PR #49, released in v2.8.1):** the recovery script checks `DB_NAME()` in every batch and says so when it runs in another database (renamed or restored target); control characters in names no longer reach its comments; the recovery guide recommends `sqlcmd -x`. CI now proves the script's own `SET QUOTED_IDENTIFIER ON` (a filtered index recreated by sqlcmd without `-I`), the wrong-database refusal, and that a hypothetical index is skipped. `benchmark.sh` has the row `import indexed, --load-as-heap`; it has not been run (the workflow runs only from master).
 - **Later (still in the backlog):** import creating missing tables, `copy --load-as-heap`, dropping foreign keys of referencing tables, clustered columnstore targets.
+
+## Done after v2.8.1 (documentation reorganized)
+
+Design: `docs/superpowers/specs/2026-11-25-docs-reorganization-design.md`.
+
+- The 708-line README became a short index (110 lines). Six task guides are in `docs/guides`: back up, restore, copy between servers, large tables, recover a failed run, and load into a live database. A per-verb reference is in `docs/reference`, with common concepts, the manifest, the JSON format and the known limitations. Build, tests, releasing and the project layout moved to `CONTRIBUTING.md`.
+- `DocsTests` checks that every option is documented on its verb's page, that every `--option` named in the docs exists, and that links and anchors resolve, pointing only to files that ship in the packages. Release packages now carry `docs/guides` and `docs/reference`.
 
 ## Backlog: large tables, later
 

@@ -104,6 +104,7 @@ All verbs share `--trust-server-certificate`, `--log-file` and `--max-tasks` (vi
 
 ## Conventions
 
+- User docs live in `docs/guides` (one page per job) and `docs/reference` (one page per verb, plus `common.md`, `manifest.md`, `json-format.md`, `limitations.md`); the README is a short index and `CONTRIBUTING.md` holds build, tests, releasing and the project layout. A new option needs a row on its verb's reference page; `DocsTests` enforces it, along with links, anchors and links only to files that ship in the release packages (which carry `docs/guides` and `docs/reference`).
 - C# files are UTF-8 with BOM and **CRLF** line endings; keep them that way.
 - `Nullable` is disabled and `ImplicitUsings` is enabled.
 - Console output goes through `PostToConsole(message, InfoLevel)` — reuse it rather than `Console.WriteLine`.
