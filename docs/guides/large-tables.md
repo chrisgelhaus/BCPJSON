@@ -109,7 +109,7 @@ The gain is that the load maintains fewer indexes. Whether the parts then load i
 - **Memory-optimized tables** are skipped: `<table>: memory-optimized; --disable-indexes ignored.`
 - **Duplicate targets:** two groups of files that resolve to the same target table (for example `T.json` and `dbo.T.json`) are refused.
 
-On the CI benchmark, loading 1,000,000 rows into an indexed table took 4.8 s with `--disable-indexes`, against 7.6 s with the indexes in place. Loading the same data into a bare heap took 2.9 s. Splitting a 1,000,000-row export into 8 parts took 2.1 s instead of 2.5 s for JSON, and 1.0 s instead of 1.3 s for BCP. These ran on a GitHub runner, so they are indicative only, and the gains grow with the table, the server and the number of readers it can feed. A benchmark workflow (`benchmark.yml`, run manually) reproduces these numbers on any row count.
+On the CI benchmark, loading 1,000,000 rows into an indexed table took 4.8 s with `--disable-indexes`, against 7.6 s with the indexes in place. Loading the same data into a bare heap took 2.9 s. Splitting a 1,000,000-row export into 8 parts took 2.1 s instead of 2.5 s for JSON, and 1.0 s instead of 1.3 s for BCP. These ran on a GitHub runner, so they are indicative only, and the gains grow with the table, the server and the number of readers it can feed. A benchmark workflow ([`benchmark.yml`](https://github.com/chrisgelhaus/BCPJSON/blob/master/.github/workflows/benchmark.yml), run manually) reproduces these numbers on any row count.
 
 ## Load as a heap: `--load-as-heap`
 
@@ -174,7 +174,7 @@ The CI benchmark loaded 5,000,000 rows into a table with a bigint identity clust
 - `--disable-indexes` took 30.1 s;
 - loading into a heap and building the indexes, done by hand, took 20.4 s: 12.9 s for the load, 3.2 s for the clustered key, and 1.7 s and 2.6 s for the nonclustered indexes.
 
-At 1,000,000 rows the two options were even (5.0 s against 4.8 s), so the gain grows with the table.
+At 1,000,000 rows the two options were even (5.0 s against 4.8 s), so the gain grows with the table. The benchmark workflow also has an `import indexed, --load-as-heap` row, but it has not been run yet, because the workflow runs only from master.
 
 ## Copy
 

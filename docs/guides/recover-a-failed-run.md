@@ -85,6 +85,7 @@ sqlcmd -S sql02 -x -f 65001 -i D:\exports\Sales\dbo.OrderHistory.load-as-heap.sq
 - **sqlcmd flags:** the script is UTF-8 with a byte order mark. `-f 65001` makes sqlcmd read non-ASCII names correctly. `-x` stops a `$(` in a name from being taken for a sqlcmd variable.
 - **Database check:** every batch checks that it runs in the database the import loaded. If that database has since been renamed or restored under another name, the script says so and changes nothing. Replace the database name in it (the `USE` line and the `DB_NAME()` checks) and run it again.
 - **Duplicate keys:** if the failure was duplicate keys, fix the data first, or the key will fail again.
+- **Tested:** CI runs the recovery script with sqlcmd, without `-I`, on SQL Server 2019, 2022 and 2025. The runs cover a filtered index and a run against the wrong database.
 
 **The next import refuses a marked table.** Every import, with or without `--load-as-heap`, checks its target tables for the markers. A marked table is an error, and is skipped unchanged:
 
