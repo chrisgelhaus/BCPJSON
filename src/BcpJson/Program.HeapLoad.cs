@@ -37,7 +37,7 @@ namespace bcpJson
             string scriptPath = HeapLoadScriptPath(options, table);
             if (HasHeapLoadMarkers(conn, table.Schema, table.Table))
             {
-                PostToConsole(string.Format("{0}: an interrupted --load-as-heap run left it without some of its indexes; run the script in {1} (or the statements in its extended properties {2}*), then import again.",
+                PostToConsole(string.Format("{0}: an interrupted --load-as-heap run left it without some of its indexes; run the script in {1} (it recreates what is missing and removes the markers; if the file is lost, the statements are in the extended properties {2}*, drop those after running them), then import again.",
                     table.Label, scriptPath, HeapLoadScript.MarkerPrefix), InfoLevel.Error);
                 return false;
             }
@@ -68,7 +68,7 @@ namespace bcpJson
                     string path = HeapLoadScriptPath(options, table);
                     try
                     {
-                        File.WriteAllText(path, HeapLoadScript.Build(table.Label, DateTime.UtcNow, indexes.Select(i => i.Statement)));
+                        File.WriteAllText(path, HeapLoadScript.Build(table.Schema, table.Table, indexes.Select(i => (i.Name, i.Statement)), DateTime.UtcNow));
                         plan = new HeapLoadPlan { Indexes = indexes, ScriptPath = path };
                     }
                     catch (Exception ex)

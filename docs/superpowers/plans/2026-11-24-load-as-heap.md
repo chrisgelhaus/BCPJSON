@@ -24,7 +24,7 @@
   - `{table}: Could not recreate {name}: {reason}. Run the script in {path}.`
   - `{table}: clustered index {name} and {k} other index(es) recreated.`
   - `{table}: rows were added after planning; not loaded.`
-  - `{table}: an interrupted --load-as-heap run left it without some of its indexes; run the script in {file} (or the statements in its extended properties bcpjson_load_as_heap_*), then import again.`
+  - `{table}: an interrupted --load-as-heap run left it without some of its indexes; run the script in {file} (it recreates what is missing and removes the markers; if the file is lost, the statements are in the extended properties bcpjson_load_as_heap_*, drop those after running them), then import again.`
   - `{file} is left over; the target is whole, delete it.`
 - Fallback reasons, verbatim, checked in this order: `--no-table-lock`, `CLR columns`, `memory-optimized`, `clustered columnstore`, `referenced by foreign key {name}`, `XML or spatial index {name}`, `disabled index {name}`, `indexed view {name}`, `temporal table`, `change tracking`, `replication`, `change data capture`, `FILESTREAM`, `full-text index`, `not empty`, `index definition too long: {name}`, `cannot write {path}: {message}`. A target that is a heap (no clustered index) gets no message and no change.
 
@@ -70,9 +70,9 @@ Ran on 2019/2022/2025 (CI run 45540422748): dropping the clustered index rebuild
   internal const string MarkerPrefix = "bcpjson_load_as_heap_";
   internal static string FileName(string schema, string table);          // schema + "." + table + Suffix
   internal static string MarkerName(int ordinal);                         // 1 -> "bcpjson_load_as_heap_001"
-  internal static string Build(string label, DateTime utc, IEnumerable<string> statements);
+  internal static string Build(string schema, string table, IEnumerable<(string Name, string Statement)> indexes, DateTime utc);
   ```
-  `Build` text: a `--` comment block (written by bcpJson import --load-as-heap for `{label}` at `{utc:yyyy-MM-dd HH:mm:ss} UTC`; run this script to recreate the indexes if the import was interrupted; each statement fails harmlessly if its index already exists), then each statement followed by a line `GO`.
+  `Build` text: a `--` comment block (written by bcpJson import --load-as-heap for `{schema}.{table}` at `{utc:yyyy-MM-dd HH:mm:ss} UTC`; run this script to recreate the indexes if the import was interrupted; rerunnable: each index is created only if it is missing, and the markers are removed at the end), then each index as `IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'[schema].[table]') AND name = N'name')` / `BEGIN` / statement / `END` / `GO`, then each marker as `IF EXISTS (SELECT 1 FROM sys.extended_properties WHERE class = 1 AND major_id = OBJECT_ID(...) AND minor_id = 0 AND name = N'marker')` / `    EXEC sys.sp_dropextendedproperty @name = N'marker', @level0type = N'SCHEMA', @level0name = N'schema', @level1type = N'TABLE', @level1name = N'table';` / `GO`. Literals via `Program.SqlLiteral`.
 
 - [ ] **Step 1: Write failing tests.**
   - `Heap_load_decision` (Theory over a facts builder): clustered with everything clear → `(true, null)`; heap → `(false, null)`; columnstore → `(false, "clustered columnstore")`; `tableLock: false` → `"--no-table-lock"`; staged → `"CLR columns"`; `ReferencingForeignKey = "FK_X"` → `"referenced by foreign key FK_X"`; `XmlOrSpatialIndex = "SIX_G"` → `"XML or spatial index SIX_G"`; `DisabledIndex = "IX_Off"` → `"disabled index IX_Off"`; `IndexedView = "dbo.V"` → `"indexed view dbo.V"`; each bool fact → its reason; `Empty = false` → `"not empty"`, but `(true, null)` with `truncateTarget: true`; `tooLongIndex: "IX_Long"` → `"index definition too long: IX_Long"`.
