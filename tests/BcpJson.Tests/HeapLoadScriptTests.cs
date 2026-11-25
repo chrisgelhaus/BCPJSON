@@ -35,7 +35,7 @@ namespace bcpJson.Tests
         public void Build_starts_with_comment_then_use_then_set_options()
         {
             string text = HeapLoadScript.Build("Sales DB", "split", "Big", new[] { ("PK_Big", "CREATE A") }, When);
-            Assert.StartsWith("-- Written by bcpJson import --load-as-heap for split.Big at 2026-11-24 08:05:03 UTC.\n", text);
+            Assert.StartsWith("-- Written by bcpJson import --load-as-heap for split.Big at 2026-11-24 08:05:03 UTC,\n-- in database Sales DB. If the database now has another name", text);
             Assert.Contains("rerunnable", text);
 
             string header = "\nUSE [Sales DB];\nGO\n" + SetHeader;
@@ -43,7 +43,7 @@ namespace bcpJson.Tests
             Assert.True(use > 0, "USE and SET header missing");
             // Only comment lines come before USE; the index batches come after the SET block.
             Assert.All(text.Substring(0, use).Split('\n'), line => Assert.StartsWith("--", line));
-            Assert.True(use < text.IndexOf("IF NOT EXISTS", StringComparison.Ordinal));
+            Assert.True(use < text.IndexOf("NOT EXISTS", StringComparison.Ordinal));
         }
 
         [Fact]
@@ -51,14 +51,14 @@ namespace bcpJson.Tests
         {
             string text = HeapLoadScript.Build("db", "split", "Big", new[] { ("PK_Big", "CREATE A"), ("IX_Big", "CREATE B") }, When);
 
-            string a = "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'[split].[Big]') AND name = N'PK_Big')\nBEGIN\nCREATE A\nEND\nGO\n";
-            string b = "IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'[split].[Big]') AND name = N'IX_Big')\nBEGIN\nCREATE B\nEND\nGO\n";
-            string markers = "\nIF (SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID(N'[split].[Big]') AND name IN (N'PK_Big', N'IX_Big')) = 2\n"
+            string a = "IF DB_NAME() = N'db' AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'[split].[Big]') AND name = N'PK_Big')\nBEGIN\nCREATE A\nEND\nGO\n";
+            string b = "IF DB_NAME() = N'db' AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'[split].[Big]') AND name = N'IX_Big')\nBEGIN\nCREATE B\nEND\nGO\n";
+            string markers = "\nIF DB_NAME() = N'db' AND (SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID(N'[split].[Big]') AND name IN (N'PK_Big', N'IX_Big')) = 2\n"
                 + "BEGIN\n"
                 + Drop("bcpjson_load_as_heap_001")
                 + Drop("bcpjson_load_as_heap_002")
                 + "END\n"
-                + "ELSE\n"
+                + "ELSE IF DB_NAME() = N'db'\n"
                 + "    RAISERROR(N'Not every index exists; the markers are kept. Fix the cause and run this script again.', 16, 1);\n"
                 + "GO\n";
 
@@ -70,14 +70,14 @@ namespace bcpJson.Tests
             Assert.EndsWith(markers, text);
             Assert.Equal(1, CountOf(text, "sp_dropextendedproperty @name = N'bcpjson_load_as_heap_001'"));
             Assert.Equal(1, CountOf(text, "sp_dropextendedproperty @name = N'bcpjson_load_as_heap_002'"));
-            Assert.Equal(1, CountOf(text, "RAISERROR("));
+            Assert.Equal(1, CountOf(text, "RAISERROR(N'Not every index exists"));
         }
 
         [Fact]
         public void Build_marker_batch_counts_a_single_index()
         {
             string text = HeapLoadScript.Build("db", "split", "Big", new[] { ("PK_Big", "CREATE A") }, When);
-            Assert.Contains("AND name IN (N'PK_Big')) = 1\nBEGIN\n" + Drop("bcpjson_load_as_heap_001") + "END\nELSE\n    RAISERROR(N'Not every index exists; ", text);
+            Assert.Contains("AND name IN (N'PK_Big')) = 1\nBEGIN\n" + Drop("bcpjson_load_as_heap_001") + "END\nELSE IF DB_NAME() = N'db'\n    RAISERROR(N'Not every index exists; ", text);
             Assert.DoesNotContain("bcpjson_load_as_heap_002", text);
         }
 
@@ -86,9 +86,41 @@ namespace bcpJson.Tests
         {
             string text = HeapLoadScript.Build("d]b", "we]ird", "O'Brien", new[] { ("IX_'x]", "CREATE A") }, When);
             Assert.Contains("\nUSE [d]]b];\nGO\n", text);
+            Assert.Contains("IF DB_NAME() = N'd]b' AND NOT EXISTS", text);
             Assert.Contains("OBJECT_ID(N'[we]]ird].[O''Brien]') AND name = N'IX_''x]')", text);
             Assert.Contains("AND name IN (N'IX_''x]')) = 1\n", text);
             Assert.Contains("@level0name = N'we]ird', @level1type = N'TABLE', @level1name = N'O''Brien';", text);
+        }
+
+        [Fact]
+        public void Build_stops_in_another_database_with_a_message_and_guards_every_batch()
+        {
+            string text = HeapLoadScript.Build("Sales%DB", "split", "Big", new[] { ("PK_Big", "CREATE A"), ("IX_Big", "CREATE B") }, When);
+            // Right after the SET block: an error naming the database (passed as a %s argument, so a '%' in it is safe).
+            Assert.Contains(SetHeader + "IF DB_NAME() <> N'Sales%DB'\n    RAISERROR(N'This script is for database %s, which is not the current database; nothing was changed.", text);
+            Assert.Contains("', 16, 1, N'Sales%DB');\nGO\n", text);
+            // Every batch that changes something checks the database first.
+            Assert.Equal(2, CountOf(text, "IF DB_NAME() = N'Sales%DB' AND NOT EXISTS"));
+            Assert.Equal(1, CountOf(text, "IF DB_NAME() = N'Sales%DB' AND (SELECT COUNT(*)"));
+            Assert.Equal(1, CountOf(text, "ELSE IF DB_NAME() = N'Sales%DB'\n    RAISERROR(N'Not every index exists"));
+        }
+
+        [Fact]
+        public void Build_keeps_control_characters_out_of_comments()
+        {
+            string text = HeapLoadScript.Build("d\nb", "s\r\nx", "t\nDROP TABLE x", new[] { ("PK", "CREATE A") }, When);
+            int use = text.IndexOf("\nUSE ", StringComparison.Ordinal);
+            Assert.All(text.Substring(0, use).Split('\n'), line => Assert.StartsWith("--", line));
+            Assert.Contains("for s??x.t?DROP TABLE x at ", text);
+            Assert.Contains("-- in database d?b.", text);
+        }
+
+        [Theory]
+        [InlineData("plain", "plain")]
+        [InlineData("a\tb\u0000c", "a?b?c")]
+        public void Comment_text(string name, string expected)
+        {
+            Assert.Equal(expected, HeapLoadScript.CommentText(name));
         }
 
         [Fact]

@@ -793,7 +793,8 @@ case "${1:-}" in
         mkdir -p "$hd"
         cp "$sj"/split.Descending.part*.json "$hd/"
         sql -d BcpJsonSplitHeap -Q "TRUNCATE TABLE split.Descending; ALTER TABLE split.Descending DROP CONSTRAINT PK_Descending;
-            ALTER TABLE split.Descending ADD CONSTRAINT PK_Descending PRIMARY KEY CLUSTERED (Val);"
+            ALTER TABLE split.Descending ADD CONSTRAINT PK_Descending PRIMARY KEY CLUSTERED (Val);
+            CREATE INDEX IX_Desc_Filt ON split.Descending (Id) WHERE Id > 0;"
         if bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitHeap --file-format json --load-as-heap --truncate-target --source-path "$hd" --source-file '*.json' > "$WORK/split-heap-dup.log" 2>&1; then
             cat "$WORK/split-heap-dup.log"; echo "::error::The import succeeded although PK_Descending could not be recreated"; exit 1
         fi
@@ -820,7 +821,16 @@ case "${1:-}" in
         # (f1) The recovery script, run by sqlcmd without -I and without -b (it sets its own options and USEs the
         #      database): with the duplicates still there the key fails, so the markers stay and RAISERROR says why.
         desc_markers() { scalar BcpJsonSplitHeap "SELECT COUNT(*) FROM sys.extended_properties WHERE class = 1 AND minor_id = 0 AND major_id = OBJECT_ID(N'split.Descending') AND name LIKE N'bcpjson[_]load[_]as[_]heap[_]%';"; }
-        run_recovery() { sqlcmd -S "$SQL_SERVER" -U "$SQL_USER" -C -f 65001 -i "$hd/split.Descending.load-as-heap.sql" > "$1" 2>&1 || true; cat "$1"; }
+        run_recovery() { sqlcmd -S "$SQL_SERVER" -U "$SQL_USER" -C -x -f 65001 -i "${2:-$hd/split.Descending.load-as-heap.sql}" > "$1" 2>&1 || true; cat "$1"; }
+        # A copy whose USE names another database (as after a restore under a new name): it says so and changes nothing.
+        sed 's/^USE \[BcpJsonSplitHeap\];$/USE [master];/' "$hd/split.Descending.load-as-heap.sql" > "$WORK/split-heap-wrongdb.sql"
+        grep -q '^USE \[master\];$' "$WORK/split-heap-wrongdb.sql" || { echo "::error::The recovery script has no USE [BcpJsonSplitHeap] line"; exit 1; }
+        markers_before="$(desc_markers)"
+        run_recovery "$WORK/split-heap-recovery0.log" "$WORK/split-heap-wrongdb.sql"
+        grep -qF "This script is for database BcpJsonSplitHeap, which is not the current database; nothing was changed." "$WORK/split-heap-recovery0.log" \
+            || { echo "::error::The recovery script run in another database did not say so"; exit 1; }
+        [ "$(desc_markers)" = "$markers_before" ] || { echo "::error::The recovery script run in another database changed the markers"; exit 1; }
+        if grep -qF "Not every index exists" "$WORK/split-heap-recovery0.log"; then echo "::error::The recovery script ran its marker batch in another database"; exit 1; fi
         run_recovery "$WORK/split-heap-recovery1.log"
         [ "$(desc_markers)" != "0" ] || { echo "::error::The recovery script dropped the markers although PK_Descending is missing"; exit 1; }
         grep -qF "Not every index exists; the markers are kept. Fix the cause and run this script again." "$WORK/split-heap-recovery1.log" \
@@ -830,10 +840,12 @@ case "${1:-}" in
         run_recovery "$WORK/split-heap-recovery2.log"
         [ "$(scalar BcpJsonSplitHeap "SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID(N'split.Descending') AND name = N'PK_Descending' AND is_primary_key = 1;")" = "1" ] \
             || { echo "::error::The recovery script did not recreate PK_Descending"; exit 1; }
+        [ "$(scalar BcpJsonSplitHeap "SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID(N'split.Descending') AND name = N'IX_Desc_Filt' AND has_filter = 1;")" = "1" ] \
+            || { echo "::error::The recovery script did not recreate the filtered index IX_Desc_Filt (it must set QUOTED_IDENTIFIER ON itself)"; exit 1; }
         [ "$(desc_markers)" = "0" ] || { echo "::error::The recovery script left markers behind"; exit 1; }
         if grep -qF "Not every index exists" "$WORK/split-heap-recovery2.log"; then echo "::error::The second recovery run still reported a missing index"; exit 1; fi
         rm -f "$hd/split.Descending.load-as-heap.sql"
-        echo "Load as heap (f1): recovery script kept the markers while the key failed, then recreated it and removed them."
+        echo "Load as heap (f1): recovery script refused another database, kept the markers while the key failed, then recreated the key and the filtered index and removed them."
 
         # (f2) A duplicate in a unique nonclustered index: the clustered index comes back, the unique one does not.
         sql -d BcpJsonSplitHeap -Q "SET NOCOUNT ON; DECLARE @n SYSNAME;
@@ -845,6 +857,7 @@ case "${1:-}" in
                 IF @n IS NULL BREAK;
                 EXEC sys.sp_dropextendedproperty @name = @n, @level0type = N'SCHEMA', @level0name = N'split', @level1type = N'TABLE', @level1name = N'Descending';
             END;
+            DROP INDEX IF EXISTS IX_Desc_Filt ON split.Descending;
             IF OBJECT_ID(N'split.PK_Descending') IS NOT NULL ALTER TABLE split.Descending DROP CONSTRAINT PK_Descending;
             TRUNCATE TABLE split.Descending;
             ALTER TABLE split.Descending ADD CONSTRAINT PK_Descending PRIMARY KEY CLUSTERED (Id DESC);
@@ -860,7 +873,11 @@ case "${1:-}" in
             || { echo "::error::PK_Descending is not the clustered index after the failed UX_Desc_Val"; exit 1; }
         echo "Load as heap (f2): UX_Desc_Val reported, PK_Descending recreated as the clustered index."
 
-        # (g) --target-table: the parts of split.Big into split.BigOther (clustered on Stamp, no primary key).
+        # (g) --target-table: the parts of split.Big into split.BigOther (clustered on Stamp, no primary key). It also has a
+        #     hypothetical index, which is skipped: still "1 index(es) dropped".
+        sql -d BcpJsonSplitHeap -Q "DROP INDEX IF EXISTS IX_BigOther_Hypo ON split.BigOther; CREATE INDEX IX_BigOther_Hypo ON split.BigOther (Id) WITH STATISTICS_ONLY = -1;"
+        [ "$(scalar BcpJsonSplitHeap "SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID(N'split.BigOther') AND name = N'IX_BigOther_Hypo' AND is_hypothetical = 1;")" = "1" ] \
+            || { echo "::error::Could not create the hypothetical index IX_BigOther_Hypo"; exit 1; }
         bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitHeap --file-format json --max-tasks 4 --load-as-heap --truncate-target --source-path "$sj" \
             --source-file 'split.Big.part*.json' --target-table split.BigOther | tee "$WORK/split-heap-other.log"
         grep -qF "split.BigOther: 1 index(es) dropped; loading 8 parts in parallel as a heap." "$WORK/split-heap-other.log" \
@@ -868,8 +885,9 @@ case "${1:-}" in
         [ "$(scalar BcpJsonSplitHeap "SELECT COUNT(*) FROM split.BigOther;")" = "200000" ] || { echo "::error::split.BigOther does not hold 200,000 rows"; exit 1; }
         [ "$(scalar BcpJsonSplitHeap "SELECT index_id FROM sys.indexes WHERE object_id = OBJECT_ID(N'split.BigOther') AND name = N'CX_BigOther_Stamp';")" = "1" ] \
             || { echo "::error::CX_BigOther_Stamp is not back as the clustered index"; exit 1; }
+        sql -d BcpJsonSplitHeap -Q "DROP INDEX IF EXISTS IX_BigOther_Hypo ON split.BigOther;"
         if ls "$sj"/*.load-as-heap.sql > /dev/null 2>&1; then echo "::error::A recovery script was left in $sj"; exit 1; fi
-        echo "Load as heap (g): --target-table split.BigOther, 200,000 rows, CX_BigOther_Stamp back."
+        echo "Load as heap (g): --target-table split.BigOther, 200,000 rows, CX_BigOther_Stamp back, hypothetical index skipped."
 
         # (h) A folder the recovery script cannot be written to: no heap load, the indexes are disabled instead.
         hr="$WORK/split-heap-readonly"
