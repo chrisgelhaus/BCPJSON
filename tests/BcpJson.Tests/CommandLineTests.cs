@@ -91,6 +91,13 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Import_load_as_heap_defaults_to_false()
+        {
+            Assert.False(Parsed<ImportOptions>("import", "--file-format", "json", "--source-file", "*.json").LoadAsHeap);
+            Assert.True(Parsed<ImportOptions>("import", "--file-format", "json", "--source-file", "*.json", "--load-as-heap").LoadAsHeap);
+        }
+
+        [Fact]
         public void Table_lock_and_snapshot_options()
         {
             Assert.False(Parsed<ImportOptions>("import", "--file-format", "bcp", "--source-file", "x.bcp").NoTableLock);

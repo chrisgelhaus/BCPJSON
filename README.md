@@ -25,7 +25,7 @@ After reading about how Facebook backs up its MySQL fleet at scale — and, just
 - **Fast loads by default:** imports and copies take a table lock (`TABLOCK`), which allows minimal logging. Opt out with `--no-table-lock` — see [Table locking](#table-locking).
 - **Point-in-time exports:** `--snapshot` reads every table from a database snapshot, so a long export or copy reflects one moment — see [Consistent point-in-time exports](#consistent-point-in-time-exports).
 - **Resilient runs:** transient failures (network drops, failovers, throttling) are retried; export files only appear under their real names once complete; every export writes a manifest with each file's SHA-256, can be checked later with `verify`, and an interrupted export continues with `--resume` — see [Resilience](#resilience).
-- **Very large tables:** `--split-tables` cuts chosen tables into key ranges that export, load and copy in parallel, and retry and resume part by part; `import --disable-indexes` loads first and rebuilds nonclustered indexes afterwards — see [Splitting large tables](#splitting-large-tables).
+- **Very large tables:** `--split-tables` cuts chosen tables into key ranges that export, load and copy in parallel, and retry and resume part by part; `import --disable-indexes` loads first and rebuilds nonclustered indexes afterwards, and `import --load-as-heap` drops all indexes of a split table, loads it as a heap and recreates them — see [Splitting large tables](#splitting-large-tables).
 - **Compression:** `--compress gzip` writes `.json.gz` / `.bcp.gz` files, several times smaller (3.2 times on the CI test data); import reads them directly — see [Compressed exports](#compressed-exports).
 - **Streaming JSON import:** rows go from the file straight into the bulk load, so memory use stays flat however large the table.
 - Windows Authentication by default; SQL logins supported.
@@ -154,6 +154,7 @@ bcpjson import --file-format json --source-path D:\dumps\aw --source-file "*.jso
 | `--max-tasks` | Maximum files imported in parallel (default unlimited). |
 | `--no-table-lock` | Load without a table lock (default: locked). See [Table locking](#table-locking). |
 | `--disable-indexes` | Disable the target's nonclustered indexes during the load and rebuild them afterwards. See [Splitting large tables](#splitting-large-tables). |
+| `--load-as-heap` | For split tables loaded into a table with a clustered index: drop its indexes, load the parts in parallel into the heap, then recreate the indexes. Other tables load as with `--disable-indexes`. See [Splitting large tables](#splitting-large-tables). |
 | `--batch-size` | Rows per committed batch (default `50000`). `0` loads each file in one transaction (each part file of a split table separately). |
 | `--trust-server-certificate`, `--log-file`, `--retries` | As for export. |
 
@@ -469,7 +470,7 @@ bcpjson export --source-database Sales --file-format bcp --export-path D:\archiv
 
 ## Splitting large tables
 
-**Applies to:** `export` (JSON and BCP) and `copy` (`--split-tables`); `import` loads the parts and adds `--disable-indexes`. **Default:** off, every table is one file. **Options:** `--split-tables pattern[:parts]`, `--disable-indexes`.
+**Applies to:** `export` (JSON and BCP) and `copy` (`--split-tables`); `import` loads the parts and adds `--disable-indexes` and `--load-as-heap`. **Default:** off, every table is one file. **Options:** `--split-tables pattern[:parts]`, `--disable-indexes`, `--load-as-heap`.
 
 One table is normally one unit of work: a single task reads it, writes its file and loads it, so a table of hundreds of millions of rows sets the length of the whole run, and a transient error redoes it from the start. `--split-tables` cuts the tables you name into **key ranges**, each handled as its own task: parts are exported, loaded and copied in parallel, and retried and resumed one by one. Tables you do not name are exported exactly as before.
 
@@ -571,6 +572,49 @@ The tables that matter most for a restore are those with many nonclustered index
 
 On the CI benchmark (1,000,000 rows into an indexed table on a GitHub runner, so indicative only), loading with `--disable-indexes` took 4.8 s instead of 7.6 s with the indexes in place; loading the same data into a bare heap took 2.9 s. Splitting a 1,000,000-row export into 8 parts took 2.1 s instead of 2.5 s for JSON and 1.0 s instead of 1.3 s for BCP; the gains grow with the table, the server and the number of readers it can feed. A benchmark workflow (`.github/workflows/benchmark.yml`, run manually) reproduces these numbers on any row count.
 
+### Load as a heap: `--load-as-heap`
+
+**Applies to:** `import` (JSON and BCP), split tables only. **Default:** off.
+
+A table with a clustered index takes its parts one after another, even with `--disable-indexes`. `--load-as-heap` drops **every** index of such a table (the clustered one and the nonclustered ones, primary key and unique constraints included), loads all parts in parallel into the resulting heap, then creates the clustered index and the others again, with the same names, columns, uniqueness, filters, compression, fill factor and filegroup or partition scheme (they are scripted with SMO from the target before anything is dropped). Use it to restore a big table into an empty target that already has its keys and indexes.
+
+```powershell
+bcpjson import --file-format json --source-path D:\dumps\sales --source-file "*.json" `
+               --target-database Sales_Restore --load-as-heap --max-tasks 8
+```
+
+The option applies to a table only when the import has two or more files for it (part files). Every other table of the run, and every table that falls back as described below, loads as with `--disable-indexes`. A target that is already a heap needs no change and gets no message. For a heap load, bcpJson logs `<table>: <k> index(es) dropped; loading <n> parts in parallel as a heap.` before the parts load and `<table>: clustered index <name> and <k> other index(es) recreated.` afterwards. The indexes are recreated even when the load failed. The target must be empty: a table with rows falls back (with `--truncate-target` it is emptied first), and rows that arrive between planning and the drop fail the table with `<table>: rows were added after planning; not loaded.`
+
+**When a table falls back.** The warning is `<table>: not loaded as a heap: <reason>; disabling indexes instead.` The first reason that applies is reported, in this order:
+
+| Reason | Why |
+|---|---|
+| `--no-table-lock` | The heap load relies on the table lock. |
+| `CLR columns` | JSON import of geography/geometry/hierarchyid goes through a staging table. |
+| `memory-optimized` | Not supported. |
+| `clustered columnstore` | Loaded one after another for a different reason; rebuilding one is a different trade-off. |
+| `referenced by foreign key <name>` | Any foreign key, including the table's own, that references the table: its keys cannot be dropped. |
+| `XML or spatial index <name>` | These need a clustered primary key and cannot exist on a heap. |
+| `disabled index <name>` | Recreating it would enable it. |
+| `indexed view <name>` | An indexed view references the table. |
+| `temporal table` | System-versioned, or a history table. |
+| `change tracking`, `replication`, `change data capture` | Enabled on the table. |
+| `FILESTREAM` | The table has FILESTREAM data. |
+| `full-text index` | The table has one. |
+| `not empty` | The target has rows and `--truncate-target` is not set. |
+| `index definition too long: <name>` | Each index statement is also saved in a marker (see below) and must fit in 3,500 characters. |
+| `cannot write <path>: <message>` | The recovery script could not be written to `--source-path`. |
+
+**If the run is interrupted, or an index cannot be recreated.** Before it drops anything, bcpJson takes two safeguards: it writes `<schema>.<table>.load-as-heap.sql` into `--source-path` (at planning), and it adds one extended property to the table per index, `bcpjson_load_as_heap_001`, `_002` and so on in creation order, each holding that index's statement. After the last part it creates the clustered index first (if that fails it stops, because nonclustered indexes built on a heap would be rebuilt again when the clustered index comes back), then each missing nonclustered index. A failure is an error, `<table>: Could not recreate <name>: <reason>. Run the script in <path>.`, and the other indexes are still created. The usual reason is duplicate keys in the loaded data: the error names the key or unique index. The markers and the script are removed only when every index exists again. The script file is never read as data (`--source-file "*"` skips it).
+
+- **Run the recovery script.** It switches to the target database and sets the session options index statements need (`QUOTED_IDENTIFIER ON` and the others, for filtered indexes), creates only the indexes that are missing, and then, only if every index exists, drops the markers; otherwise it raises `Not every index exists; the markers are kept. Fix the cause and run this script again.` and keeps them. Running it again is safe. It is UTF-8 with a byte order mark; with sqlcmd add `-f 65001` so non-ASCII names are read correctly: `sqlcmd -S <server> -f 65001 -i dbo.OrderHistory.load-as-heap.sql`. If the failure was duplicate keys, fix the data first, or the key will fail again.
+- **The next import refuses a marked table.** Every import, with or without `--load-as-heap`, checks its target tables for the markers. A marked table is an error and is skipped, unchanged: `<table>: an earlier --load-as-heap run left it without some of its indexes; run the script in <file> (...), then import again.` The path in the message is built from the current `--source-path`; if you import from another folder, use the script in the folder of the earlier run. If the script file is lost, the statements are in the table's extended properties `bcpjson_load_as_heap_*`: run them, then drop the properties.
+- **A script without markers** (a run that stopped before dropping anything) only warns: `<file> is left over and <table> has no markers; if all its indexes exist, delete it.` Before deleting it, check that the indexes in the script all exist.
+
+**Edition note.** Building an index uses several threads only on Enterprise and Developer editions. On other editions SQL Server builds each index on one thread, so recreating the indexes takes longer and the gain over `--disable-indexes` is smaller than below.
+
+On the CI benchmark (5,000,000 rows into a table with a bigint identity clustered primary key and two nonclustered indexes, 8 JSON parts, SQL Server 2022 Developer on a 4-core runner, so indicative only), loading into the indexed table took 53.9 s and `--disable-indexes` took 30.1 s. Loading into a heap and building the indexes took 20.4 s (12.9 s load, 3.2 s clustered key, 1.7 s and 2.6 s for the nonclustered indexes), done by hand. At 1,000,000 rows the two options were even (5.0 s against 4.8 s), so the gain grows with the table. `benchmark.sh` also has an `import indexed, --load-as-heap` row; it has not been run yet (the benchmark workflow runs only from master).
+
 ### Copy
 
 With `--split-tables`, `copy` streams each key range from the source straight into the target, several at once and without files in between. When `copy` creates the table, it first loads it as a heap (so the parts load in parallel) and builds the indexes after every part has arrived, as for any copy. Into a table that already exists, the load-mode rules above apply. Keys, indexes and check constraints are created only when every part succeeded; otherwise an error says `<table>: copy incomplete (<k> of <n> parts failed)` and the table needs to be copied again.
@@ -600,6 +644,7 @@ Each file is a JSON array with one object per row, one row per line:
 - `copy --source-query` is not supported.
 - `copy` recreates keys, indexes and check constraints (and foreign keys and triggers on request), but not other objects such as views, procedures, functions or DDL triggers; indexes are placed on the target's default filegroup. A partitioned source table is created on the target's partition scheme of the same name if there is one (its function must take the partitioning column's type, or creating the table fails), and unpartitioned otherwise.
 - **Split tables:** a key with one dominant value cannot be cut inside that value, and text keys may yield fewer parts than asked; BCP exports are unordered, so BCP imports give SQL Server no `ORDER` hint; `--batch-size 0` is one transaction per part, not per table; and a real table whose name ends in `.part` and four digits (for example `dbo.x.part0001`) is read as a part on import. bcpJson does not test loading a table with a sparse column set through JSON import or copy; such tables are never split.
+- **`--load-as-heap`** applies only to split tables loaded into empty targets, and not to tables referenced by foreign keys, with XML, spatial, disabled or full-text indexes, indexed views, temporal tables, change tracking, replication, CDC, FILESTREAM, memory-optimized tables or clustered columnstore indexes (see the list under [Splitting large tables](#splitting-large-tables)). CI proves the recovery script is written but does not run it.
 - `import` bulk loads without checking constraints (the bcp and SqlBulkCopy default, which is what makes it fast). Foreign key and check constraints on the target tables are not validated during the load and SQL Server marks them as not trusted; run `ALTER TABLE ... WITH CHECK CHECK CONSTRAINT ALL` afterwards if you need them trusted.
 - BCP import into a table whose schema or table name contains `.` or `"` **and** that has a filtered, XML or spatial index fails (bcp cannot set `QUOTED_IDENTIFIER ON` for such names). Use JSON import for that table.
 - `-k` on export is reserved; JSON always writes NULLs.
@@ -636,6 +681,7 @@ The solution `BcpJson.sln` holds the app in `src/BcpJson/` and the xUnit tests i
 | `ExportManifest.cs` | `bcpjson-manifest.json`: read, write, file hashes, resume checks |
 | `Program.Split.cs` | Split planning: `TableSplit` and `PlanSplit` (the split exports and copies run in `Program.Export.cs` and `Program.Copy.cs`) |
 | `Program.Indexes.cs` | `--disable-indexes`: disabling and rebuilding indexes |
+| `Program.HeapLoad.cs`, `HeapLoadScript.cs` | `--load-as-heap`: planning, dropping and recreating indexes; recovery script and markers |
 | `SplitRequest.cs`, `KeyRange.cs`, `KeyInterpolation.cs`, `RangePlanner.cs` | `--split-tables` parsing, key ranges and boundary selection |
 | `PartFiles.cs`, `LoadPlanning.cs`, `WorkQueue.cs` | Part file names, parallel or sequential loading, per-table work ordering |
 | `Program.Sql.cs` | Table selection, name quoting, shared SQL helpers |

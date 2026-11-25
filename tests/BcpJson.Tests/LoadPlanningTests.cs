@@ -8,6 +8,54 @@ namespace bcpJson.Tests
         private static TargetShape Clustered(int nc) => new TargetShape(true, false, nc, false);
         private static TargetShape Columnstore(int nc) => new TargetShape(false, true, nc, false);
 
+        private static HeapLoadFacts Facts(Func<HeapLoadFacts, HeapLoadFacts> change = null)
+        {
+            var f = new HeapLoadFacts(true, false, false, null, null, null, null, false, false, false, false, false, false, true);
+            return change == null ? f : change(f);
+        }
+
+        public static IEnumerable<object[]> HeapDecisions()
+        {
+            yield return new object[] { Facts(), true, false, false, null, true, null };
+            yield return new object[] { Facts(f => f with { ClusteredRowstore = false }), true, false, false, null, false, null };
+            yield return new object[] { Facts(f => f with { ClusteredRowstore = false, ClusteredColumnstore = true }), true, false, false, null, false, "clustered columnstore" };
+            yield return new object[] { Facts(), false, false, false, null, false, "--no-table-lock" };
+            yield return new object[] { Facts(), true, true, false, null, false, "CLR columns" };
+            yield return new object[] { Facts(f => f with { MemoryOptimized = true }), true, false, false, null, false, "memory-optimized" };
+            yield return new object[] { Facts(f => f with { ReferencingForeignKey = "FK_X" }), true, false, false, null, false, "referenced by foreign key FK_X" };
+            yield return new object[] { Facts(f => f with { XmlOrSpatialIndex = "SIX_G" }), true, false, false, null, false, "XML or spatial index SIX_G" };
+            yield return new object[] { Facts(f => f with { DisabledIndex = "IX_Off" }), true, false, false, null, false, "disabled index IX_Off" };
+            yield return new object[] { Facts(f => f with { IndexedView = "dbo.V" }), true, false, false, null, false, "indexed view dbo.V" };
+            yield return new object[] { Facts(f => f with { Temporal = true }), true, false, false, null, false, "temporal table" };
+            yield return new object[] { Facts(f => f with { ChangeTracking = true }), true, false, false, null, false, "change tracking" };
+            yield return new object[] { Facts(f => f with { Replicated = true }), true, false, false, null, false, "replication" };
+            yield return new object[] { Facts(f => f with { ChangeDataCapture = true }), true, false, false, null, false, "change data capture" };
+            yield return new object[] { Facts(f => f with { Filestream = true }), true, false, false, null, false, "FILESTREAM" };
+            yield return new object[] { Facts(f => f with { FullText = true }), true, false, false, null, false, "full-text index" };
+            yield return new object[] { Facts(f => f with { Empty = false }), true, false, false, null, false, "not empty" };
+            yield return new object[] { Facts(f => f with { Empty = false }), true, false, true, null, true, null };
+            yield return new object[] { Facts(), true, false, false, "IX_Long", false, "index definition too long: IX_Long" };
+        }
+
+        [Theory]
+        [MemberData(nameof(HeapDecisions))]
+        public void Heap_load_decision(HeapLoadFacts facts, bool tableLock, bool staged, bool truncate, string tooLong, bool expected, string reason)
+        {
+            var d = LoadPlanning.DecideHeapLoad(facts, tableLock, staged, truncate, tooLong);
+            Assert.Equal(expected, d.LoadAsHeap);
+            Assert.Equal(reason, d.Reason);
+        }
+
+        [Fact]
+        public void Heap_load_reason_precedence()
+        {
+            var both = Facts(f => f with { MemoryOptimized = true, ReferencingForeignKey = "FK_X" });
+            Assert.Equal("--no-table-lock", LoadPlanning.DecideHeapLoad(both, false, false, false, null).Reason);
+            Assert.Equal("memory-optimized", LoadPlanning.DecideHeapLoad(both, true, false, false, null).Reason);
+            var dis = Facts(f => f with { DisabledIndex = "IX_Off", IndexedView = "dbo.V" });
+            Assert.Equal("disabled index IX_Off", LoadPlanning.DecideHeapLoad(dis, true, false, false, null).Reason);
+        }
+
         public static IEnumerable<object[]> Modes()
         {
             LoadMode cci = LoadPlanning.ClusteredColumnstoreLoadsInParallel ? LoadMode.Parallel : LoadMode.Sequential;

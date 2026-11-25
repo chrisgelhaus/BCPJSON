@@ -65,6 +65,16 @@ Design: `docs/superpowers/specs/2026-11-23-key-range-splitting-design.md` (with 
 - **Copy:** parallel source-to-target range streams; copy now creates a partitioned table on a same-named partition scheme when the target has one.
 - **CI:** `roundtrip.sh split`, a lock probe that measured the lock modes of concurrent TABLOCK loads (heap BU, clustered rowstore Sch-M/X, clustered columnstore S+X), and a manual benchmark workflow (`benchmark.yml`).
 
+## Done after v2.7.0 (`import --load-as-heap`, PR #48)
+
+Design: `docs/superpowers/specs/2026-11-23-load-as-heap-design.md` (with an "As built" section). Documented in the README, "Splitting large tables".
+
+- **`import --load-as-heap`** (JSON and BCP, split tables only): drops every index of a table with a clustered index, loads the parts in parallel into the heap, then recreates the clustered index and the others, also after a failed load. Tables that do not qualify fall back to `--disable-indexes` with `not loaded as a heap: <reason>`. Benchmark (5,000,000 rows): 53.9 s indexed, 30.1 s `--disable-indexes`, 20.4 s heap load plus index builds.
+- **Why every index is dropped:** the first design disabled the nonclustered indexes and dropped only the clustered one. A CI probe (run 45540422748) showed that dropping a clustered index rebuilds and re-enables disabled nonclustered indexes on SQL Server 2019, 2022 and 2025, so the owner chose to drop and recreate all of them.
+- **Safety net:** a rerunnable recovery script `<schema>.<table>.load-as-heap.sql` in `--source-path` (written at planning) and one `bcpjson_load_as_heap_NNN` extended property per index on the table; every import refuses a marked table. Both are removed when all indexes exist again. The script sets its own session options and drops the markers only when every index exists.
+- **CI:** `roundtrip.sh split` cases (a) to (i) on SQL Server 2019, 2022 and 2025: index definitions identical before and after (`heap_indexes.sql`), BCP parts, a failed load, duplicate keys in the clustered and in a unique index, `--target-table`, an unwritable folder, a leftover script, and the recovery script run by sqlcmd (markers kept while the key fails, removed once it succeeds). `benchmark.sh` has the row `import indexed, --load-as-heap`; it has not been run (the workflow runs only from master).
+- **Later (still in the backlog):** import creating missing tables, `copy --load-as-heap`, dropping foreign keys of referencing tables, clustered columnstore targets.
+
 ## Backlog: large tables, later
 
 From the design's "Later" list:
@@ -72,7 +82,7 @@ From the design's "Later" list:
 - **Staging tables for large history tables:** load parts into staging tables and move them in over time. First step: **partition switching** (one indexed staging table per partition, loaded in parallel, then `SWITCH`).
 - **Partition-scoped work:** `TRUNCATE TABLE ... WITH (PARTITIONS (...))`, and exporting only chosen partitions (incremental backups of history tables).
 - **Sub-splitting a dominant partition**, and copying partition functions, schemes and filegroups to the target.
-- **Option 2** (load into a heap, then create the clustered index): **decided: build it** (design started 2026-11-23). Benchmark run 45326185184 (2026-11-24, 5,000,000 rows, bigint identity clustered PK + two nonclustered indexes, 8 JSON parts, SQL Server 2022, 4 cores):
+- **Option 2** (load into a heap, then create the clustered index): **done, see "Done after v2.7.0" above** (`import --load-as-heap`). Benchmark run 45326185184 (2026-11-24, 5,000,000 rows, bigint identity clustered PK + two nonclustered indexes, 8 JSON parts, SQL Server 2022, 4 cores):
 
   | Step | Seconds | Rows/s |
   |---|---:|---:|
@@ -84,6 +94,7 @@ From the design's "Later" list:
   | Option 2: heap load 12.9 + clustered PK 3.2 + two nonclustered 1.7 + 2.6 | 20.4 | 245k |
 
   Option 2 is 33% faster than `--disable-indexes` and 2.6x a plain load; at 1,000,000 rows the two were even (5.0 s against 4.8 s). One run on a small runner with presorted keys: the ratios are indicative.
+- **Later, from the load-as-heap design:** import creating missing tables from table definitions saved by export (such tables would then load heap first, like `copy`); `copy --load-as-heap` and `copy --disable-indexes` for existing targets; dropping and recreating the foreign keys of referencing tables (rejected 2026-11-23); clustered columnstore targets.
 - `--split-above` (automatic size threshold), per-table `--disable-indexes`, and `--disable-indexes` for `copy` into existing tables.
 - **Multi-column ranges** for skewed leading keys (one dominant value), and splitting unpartitioned heaps.
 - Splitting by row count, if a use case appears.

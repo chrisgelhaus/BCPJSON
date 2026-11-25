@@ -67,7 +67,8 @@ namespace bcpJson
         internal static bool IsImportableFile(string name)
         {
             return !name.Equals(ExportManifest.FileName, StringComparison.OrdinalIgnoreCase)
-                && !name.EndsWith(PartialSuffix, StringComparison.OrdinalIgnoreCase);
+                && !name.EndsWith(PartialSuffix, StringComparison.OrdinalIgnoreCase)
+                && !name.EndsWith(HeapLoadScript.Suffix, StringComparison.OrdinalIgnoreCase);
         }
 
         private static FileInfo[] FindSourceFiles(ImportOptions options)
@@ -227,6 +228,11 @@ namespace bcpJson
             }
             firstFileOfTable[table.ObjectId] = files[0].Name;
 
+            if (!CheckHeapLoadLeftovers(conn, options, table))
+            {
+                return new List<ImportItem>();
+            }
+
             if (!json)
             {
                 // Checked before anything touches the target, so a missing format file never leaves it truncated.
@@ -248,42 +254,69 @@ namespace bcpJson
             }
             table.Files = files;
 
+            bool staged = json && GetImportColumns(conn, table.ObjectId).Any(c => c.IsClrType);
+            // --load-as-heap applies to split tables only; every other table loads as with --disable-indexes.
+            HeapLoadPlan heapPlan = options.LoadAsHeap && files.Count > 1 ? PlanHeapLoad(conn, options, table, staged) : null;
+
             var toDisable = new List<IndexInfo>();
-            if (options.DisableIndexes)
+            TargetShape shape;
+            string sequentialReason;
+            try
             {
-                if (IsMemoryOptimized(conn, table.ObjectId))
+                if (heapPlan == null && (options.DisableIndexes || options.LoadAsHeap))
                 {
-                    PostToConsole(string.Format("{0}: memory-optimized; --disable-indexes ignored.", table.Label));
+                    if (IsMemoryOptimized(conn, table.ObjectId))
+                    {
+                        PostToConsole(string.Format("{0}: memory-optimized; --disable-indexes ignored.", table.Label));
+                    }
+                    else
+                    {
+                        toDisable = LoadPlanning.IndexesToDisable(ReadIndexes(conn, table.ObjectId));
+                    }
                 }
-                else
+
+                shape = ReadTargetShape(conn, table.ObjectId, toDisable.Select(i => i.IndexId).ToHashSet());
+                if (heapPlan != null)
                 {
-                    toDisable = LoadPlanning.IndexesToDisable(ReadIndexes(conn, table.ObjectId));
+                    shape = new TargetShape(false, false, 0, shape.Partitioned);   // the shape after the drop: a heap
+                }
+                sequentialReason = LoadPlanning.SequentialReason(shape, !options.NoTableLock, staged);
+
+                if (files.Count > 1)
+                {
+                    PostToConsole(sequentialReason == null
+                        ? string.Format("{0}: {1} parts, loading in parallel.", table.Label, files.Count)
+                        : string.Format("{0}: {1} parts, loading one after another ({2}).", table.Label, files.Count, sequentialReason));
+                    if (options.NoTableLock && shape.Partitioned
+                        && !string.Equals(LockEscalation(conn, table.ObjectId), "AUTO", StringComparison.OrdinalIgnoreCase))
+                    {
+                        PostToConsole(string.Format("{0}: partitioned; ALTER TABLE {1} SET (LOCK_ESCALATION = AUTO) lets parts in different partitions load without blocking each other.",
+                            table.Label, table.QualifiedName));
+                    }
                 }
             }
-
-            bool staged = json && GetImportColumns(conn, table.ObjectId).Any(c => c.IsClrType);
-            TargetShape shape = ReadTargetShape(conn, table.ObjectId, toDisable.Select(i => i.IndexId).ToHashSet());
-            string sequentialReason = LoadPlanning.SequentialReason(shape, !options.NoTableLock, staged);
-
-            if (files.Count > 1)
+            catch when (heapPlan != null)
             {
-                PostToConsole(sequentialReason == null
-                    ? string.Format("{0}: {1} parts, loading in parallel.", table.Label, files.Count)
-                    : string.Format("{0}: {1} parts, loading one after another ({2}).", table.Label, files.Count, sequentialReason));
-                if (options.NoTableLock && shape.Partitioned
-                    && !string.Equals(LockEscalation(conn, table.ObjectId), "AUTO", StringComparison.OrdinalIgnoreCase))
-                {
-                    PostToConsole(string.Format("{0}: partitioned; ALTER TABLE {1} SET (LOCK_ESCALATION = AUTO) lets parts in different partitions load without blocking each other.",
-                        table.Label, table.QualifiedName));
-                }
+                // The recovery script was written by PlanHeapLoad; the table is skipped, so the file must not stay behind.
+                DeleteHeapLoadScript(heapPlan);
+                throw;
             }
 
             List<ImportItem> items = sequentialReason == null
                 ? files.Select(f => new ImportItem(table, new List<FileInfo> { f })).ToList()
                 : new List<ImportItem> { new ImportItem(table, files) };
 
-            Action before = options.TruncateTarget || toDisable.Count > 0 ? () => PrepareImportTarget(options, table, toDisable) : null;
-            Action after = toDisable.Count > 0 ? () => RebuildDisabledIndexes(options, table, toDisable) : null;
+            Action before, after;
+            if (heapPlan != null)
+            {
+                before = () => PrepareHeapLoad(options, table, heapPlan, files.Count);
+                after = () => FinishHeapLoad(options, table, heapPlan);
+            }
+            else
+            {
+                before = options.TruncateTarget || toDisable.Count > 0 ? () => PrepareImportTarget(options, table, toDisable) : null;
+                after = toDisable.Count > 0 ? () => RebuildDisabledIndexes(options, table, toDisable) : null;
+            }
             table.Work = new TableWork(table.Label, items.Count, before, after);
             return items;
         }
