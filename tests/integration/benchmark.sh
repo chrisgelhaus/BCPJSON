@@ -7,7 +7,8 @@
 #   export JSON and BCP, unsplit and --split-tables bench.History:8
 #   import of the split JSON parts into (a) an indexed table, (b) the same with --disable-indexes, (c) a bare heap,
 #   (d) a bare heap followed by CREATE CLUSTERED INDEX and both nonclustered indexes (the build times are reported
-#   separately from the load: this is "option 2" done by hand)
+#   separately from the load: this is "option 2" done by hand), (e) an indexed table with --load-as-heap (the same
+#   drop, heap load and rebuild, done by bcpjson)
 # and writes a Markdown table (seconds, rows/s) to $GITHUB_STEP_SUMMARY (stdout when unset).
 #
 # Environment: SQL_SERVER (default localhost), SQL_USER (default sa), SQL_PASSWORD (required),
@@ -163,6 +164,10 @@ timed_sql "  CREATE INDEX IX_History_Account" BenchD "CREATE INDEX IX_History_Ac
 BUILD_D="$(printf '%s\n' "${SECS[@]:$START_INDEXES}" | awk '{ s += $1 } END { printf "%.1f", s }')"
 NAMES+=("option 2 total (heap load + index builds)")
 SECS+=("$(awk -v a="$LOAD_D" -v b="$BUILD_D" 'BEGIN { printf "%.1f", a + b }')")
+
+create_db BenchE yes
+timed "import indexed, --load-as-heap" bcpjson "${IMPORT[@]}" --target-database BenchE --load-as-heap
+check_rows BenchE
 
 # ---- summary ------------------------------------------------------------------------------------------------------
 {
