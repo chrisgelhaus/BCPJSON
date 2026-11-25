@@ -29,7 +29,7 @@ namespace bcpJson
         }
 
         /// <summary>
-        /// Planning checks every import makes: a target marked by an interrupted --load-as-heap run is refused
+        /// Planning checks every import makes: a target marked by an earlier --load-as-heap run is refused
         /// (false); a recovery script without markers is only a warning.
         /// </summary>
         private static bool CheckHeapLoadLeftovers(SqlConnection conn, ImportOptions options, ImportTable table)
@@ -37,13 +37,13 @@ namespace bcpJson
             string scriptPath = HeapLoadScriptPath(options, table);
             if (HasHeapLoadMarkers(conn, table.Schema, table.Table))
             {
-                PostToConsole(string.Format("{0}: an interrupted --load-as-heap run left it without some of its indexes; run the script in {1} (it recreates what is missing and removes the markers; if the file is lost, the statements are in the extended properties {2}*, drop those after running them), then import again.",
+                PostToConsole(string.Format("{0}: an earlier --load-as-heap run left it without some of its indexes; run the script in {1} (it recreates what is missing and removes the markers; if the file is lost, the statements are in the extended properties {2}*, drop those after running them), then import again.",
                     table.Label, scriptPath, HeapLoadScript.MarkerPrefix), InfoLevel.Error);
                 return false;
             }
             if (File.Exists(scriptPath))
             {
-                PostToConsole(string.Format("{0} is left over; the target is whole, delete it.", scriptPath), InfoLevel.Warning);
+                PostToConsole(string.Format("{0} is left over and {1} has no markers; if all its indexes exist, delete it.", scriptPath, table.Label), InfoLevel.Warning);
             }
             return true;
         }
@@ -60,7 +60,8 @@ namespace bcpJson
             HeapLoadPlan plan = null;
             if (decision.LoadAsHeap)
             {
-                List<SavedIndex> indexes = ScriptTargetIndexes(options, table.Schema, table.Table);
+                string database = conn.Database;
+                List<SavedIndex> indexes = ScriptTargetIndexes(options, database, table.Schema, table.Table, HypotheticalIndexNames(conn, table.ObjectId));
                 string tooLong = indexes.FirstOrDefault(i => i.Statement.Length > LoadPlanning.MaxIndexStatementLength)?.Name;
                 decision = LoadPlanning.DecideHeapLoad(facts, !options.NoTableLock, staged, options.TruncateTarget, tooLong);
                 if (decision.LoadAsHeap)
@@ -68,12 +69,12 @@ namespace bcpJson
                     string path = HeapLoadScriptPath(options, table);
                     try
                     {
-                        File.WriteAllText(path, HeapLoadScript.Build(table.Schema, table.Table, indexes.Select(i => (i.Name, i.Statement)), DateTime.UtcNow));
+                        HeapLoadScript.Write(path, HeapLoadScript.Build(database, table.Schema, table.Table, indexes.Select(i => (i.Name, i.Statement)), DateTime.UtcNow));
                         plan = new HeapLoadPlan { Indexes = indexes, ScriptPath = path };
                     }
                     catch (Exception ex)
                     {
-                        decision = new HeapLoadDecision(false, string.Format("cannot write {0}: {1}", path, ex.Message));
+                        decision = new HeapLoadDecision(false, string.Format("cannot write {0}: {1}", path, ex.Message.Trim().TrimEnd('.')));
                     }
                 }
             }
@@ -93,8 +94,8 @@ DECLARE @emptySql NVARCHAR(MAX) = N'SELECT @empty = CASE WHEN EXISTS (SELECT 1 F
     + QUOTENAME(OBJECT_SCHEMA_NAME(@objectId)) + N'.' + QUOTENAME(OBJECT_NAME(@objectId)) + N') THEN 0 ELSE 1 END;';
 EXEC sys.sp_executesql @emptySql, N'@empty BIT OUTPUT', @empty = @empty OUTPUT;
 
-SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id = t.object_id AND i.type = 1) THEN 1 ELSE 0 END AS BIT) AS clustered_rowstore,
-       CAST(CASE WHEN EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id = t.object_id AND i.type = 5) THEN 1 ELSE 0 END AS BIT) AS clustered_columnstore,
+SELECT CAST(CASE WHEN EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id = t.object_id AND i.type = 1 AND i.is_hypothetical = 0) THEN 1 ELSE 0 END AS BIT) AS clustered_rowstore,
+       CAST(CASE WHEN EXISTS (SELECT 1 FROM sys.indexes i WHERE i.object_id = t.object_id AND i.type = 5 AND i.is_hypothetical = 0) THEN 1 ELSE 0 END AS BIT) AS clustered_columnstore,
        t.is_memory_optimized,
        (SELECT TOP (1) fk.name FROM sys.foreign_keys fk WHERE fk.referenced_object_id = t.object_id ORDER BY fk.name) AS referencing_fk,
        (SELECT TOP (1) i.name FROM sys.indexes i WHERE i.object_id = t.object_id AND i.type IN (3, 4) ORDER BY i.index_id) AS xml_or_spatial,
@@ -148,21 +149,11 @@ WHERE t.object_id = @objectId;";
         /// <summary>
         /// Every index and key constraint of the target, scripted by SMO in creation order (clustered first, then
         /// <see cref="IndexCreationRank"/>). Filegroup or partition scheme, compression, fill factor, filters and
-        /// included columns are kept: unlike copy, the indexes come back in the same database.
+        /// included columns are kept, hypothetical indexes skipped: unlike copy, the indexes come back in the same database.
         /// </summary>
-        static List<SavedIndex> ScriptTargetIndexes(ImportOptions options, string schema, string table)
+        static List<SavedIndex> ScriptTargetIndexes(ImportOptions options, string databaseName, string schema, string table, HashSet<string> hypothetical)
         {
             string connectionString = options.GetTargetConnectionString();
-            string databaseName = new SqlConnectionStringBuilder(connectionString).InitialCatalog;
-            if (string.IsNullOrEmpty(databaseName))
-            {
-                // No --target-database: the login's default database.
-                using (var probe = SqlConnectionFactory.Create(connectionString))
-                {
-                    probe.Open();
-                    databaseName = probe.Database;
-                }
-            }
 
             var scripting = new ScriptingOptions
             {
@@ -182,6 +173,7 @@ WHERE t.object_id = @objectId;";
                         throw new InvalidOperationException("Target table not found by SMO.");
                     }
                     return target.Indexes.Cast<Index>()
+                        .Where(i => !hypothetical.Contains(i.Name))
                         .OrderBy(i => IndexCreationRank(i.IndexType, i.IsClustered))
                         .ThenBy(i => i.ID)
                         .Select(i => new SavedIndex(i.Name, i.IsClustered, i.IndexKeyType != IndexKeyType.None,
@@ -410,8 +402,19 @@ WHERE ep.class = 1
 
         private static HashSet<string> ExistingIndexNames(SqlConnection conn, int objectId)
         {
+            return IndexNames(conn, objectId, "");
+        }
+
+        /// <summary>Hypothetical indexes (Database Tuning Advisor) hold no data: load-as-heap neither drops nor recreates them.</summary>
+        private static HashSet<string> HypotheticalIndexNames(SqlConnection conn, int objectId)
+        {
+            return IndexNames(conn, objectId, " AND i.is_hypothetical = 1");
+        }
+
+        private static HashSet<string> IndexNames(SqlConnection conn, int objectId, string condition)
+        {
             var names = new HashSet<string>(StringComparer.Ordinal);
-            using (var cmd = new SqlCommand("SELECT i.name FROM sys.indexes i WHERE i.object_id = @objectId AND i.name IS NOT NULL;", conn))
+            using (var cmd = new SqlCommand("SELECT i.name FROM sys.indexes i WHERE i.object_id = @objectId AND i.name IS NOT NULL" + condition + ";", conn))
             {
                 cmd.Parameters.Add("@objectId", SqlDbType.Int).Value = objectId;
                 using (var reader = cmd.ExecuteReader())

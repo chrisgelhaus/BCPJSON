@@ -2,7 +2,8 @@
     One line per index of the "split" schema, ordered by table and index name, for import --load-as-heap: every
     property it must bring back after dropping and recreating the indexes. Fields are separated by " | ":
     table, index, type, unique, primary key, unique constraint, filter, data space (filegroup or partition scheme),
-    compression (MIN over partitions), key columns in key order with ASC/DESC, included columns, disabled.
+    compression (MIN over partitions), key columns in key order with ASC/DESC, included columns, disabled, fill factor,
+    IGNORE_DUP_KEY, ALLOW_PAGE_LOCKS, ALLOW_ROW_LOCKS and STATISTICS_NORECOMPUTE (sys.stats).
     Run with: sqlcmd -h -1 -W -i heap_indexes.sql; a before/after comparison is a diff of the output.
     Catalog columns use different collations, so every piece is converted with COLLATE DATABASE_DEFAULT.
 */
@@ -33,10 +34,16 @@ SELECT CAST(s.name COLLATE DATABASE_DEFAULT + N'.' + t.name COLLATE DATABASE_DEF
              WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id AND ic.is_included_column = 1
              ORDER BY c.name
              FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, N''), N'')
-       + N' | disabled=' + CAST(i.is_disabled AS NVARCHAR(1)) AS NVARCHAR(2000)) AS [index]
+       + N' | disabled=' + CAST(i.is_disabled AS NVARCHAR(1))
+       + N' | fill=' + CAST(i.fill_factor AS NVARCHAR(3))
+       + N' ignore_dup=' + CAST(i.ignore_dup_key AS NVARCHAR(1))
+       + N' page_locks=' + CAST(i.allow_page_locks AS NVARCHAR(1))
+       + N' row_locks=' + CAST(i.allow_row_locks AS NVARCHAR(1))
+       + N' no_recompute=' + ISNULL(CAST(st.no_recompute AS NVARCHAR(1)), N'-') AS NVARCHAR(2000)) AS [index]
 FROM sys.indexes i
      JOIN sys.tables t ON t.object_id = i.object_id
      JOIN sys.schemas s ON s.schema_id = t.schema_id
      LEFT JOIN sys.data_spaces ds ON ds.data_space_id = i.data_space_id
+     LEFT JOIN sys.stats st ON st.object_id = i.object_id AND st.stats_id = i.index_id
 WHERE s.name = N'split' AND i.index_id > 0
 ORDER BY s.name, t.name, i.name;

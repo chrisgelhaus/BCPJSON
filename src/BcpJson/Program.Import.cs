@@ -259,36 +259,47 @@ namespace bcpJson
             HeapLoadPlan heapPlan = options.LoadAsHeap && files.Count > 1 ? PlanHeapLoad(conn, options, table, staged) : null;
 
             var toDisable = new List<IndexInfo>();
-            if (heapPlan == null && (options.DisableIndexes || options.LoadAsHeap))
+            TargetShape shape;
+            string sequentialReason;
+            try
             {
-                if (IsMemoryOptimized(conn, table.ObjectId))
+                if (heapPlan == null && (options.DisableIndexes || options.LoadAsHeap))
                 {
-                    PostToConsole(string.Format("{0}: memory-optimized; --disable-indexes ignored.", table.Label));
+                    if (IsMemoryOptimized(conn, table.ObjectId))
+                    {
+                        PostToConsole(string.Format("{0}: memory-optimized; --disable-indexes ignored.", table.Label));
+                    }
+                    else
+                    {
+                        toDisable = LoadPlanning.IndexesToDisable(ReadIndexes(conn, table.ObjectId));
+                    }
                 }
-                else
+
+                shape = ReadTargetShape(conn, table.ObjectId, toDisable.Select(i => i.IndexId).ToHashSet());
+                if (heapPlan != null)
                 {
-                    toDisable = LoadPlanning.IndexesToDisable(ReadIndexes(conn, table.ObjectId));
+                    shape = new TargetShape(false, false, 0, shape.Partitioned);   // the shape after the drop: a heap
+                }
+                sequentialReason = LoadPlanning.SequentialReason(shape, !options.NoTableLock, staged);
+
+                if (files.Count > 1)
+                {
+                    PostToConsole(sequentialReason == null
+                        ? string.Format("{0}: {1} parts, loading in parallel.", table.Label, files.Count)
+                        : string.Format("{0}: {1} parts, loading one after another ({2}).", table.Label, files.Count, sequentialReason));
+                    if (options.NoTableLock && shape.Partitioned
+                        && !string.Equals(LockEscalation(conn, table.ObjectId), "AUTO", StringComparison.OrdinalIgnoreCase))
+                    {
+                        PostToConsole(string.Format("{0}: partitioned; ALTER TABLE {1} SET (LOCK_ESCALATION = AUTO) lets parts in different partitions load without blocking each other.",
+                            table.Label, table.QualifiedName));
+                    }
                 }
             }
-
-            TargetShape shape = ReadTargetShape(conn, table.ObjectId, toDisable.Select(i => i.IndexId).ToHashSet());
-            if (heapPlan != null)
+            catch when (heapPlan != null)
             {
-                shape = new TargetShape(false, false, 0, shape.Partitioned);   // the shape after the drop: a heap
-            }
-            string sequentialReason = LoadPlanning.SequentialReason(shape, !options.NoTableLock, staged);
-
-            if (files.Count > 1)
-            {
-                PostToConsole(sequentialReason == null
-                    ? string.Format("{0}: {1} parts, loading in parallel.", table.Label, files.Count)
-                    : string.Format("{0}: {1} parts, loading one after another ({2}).", table.Label, files.Count, sequentialReason));
-                if (options.NoTableLock && shape.Partitioned
-                    && !string.Equals(LockEscalation(conn, table.ObjectId), "AUTO", StringComparison.OrdinalIgnoreCase))
-                {
-                    PostToConsole(string.Format("{0}: partitioned; ALTER TABLE {1} SET (LOCK_ESCALATION = AUTO) lets parts in different partitions load without blocking each other.",
-                        table.Label, table.QualifiedName));
-                }
+                // The recovery script was written by PlanHeapLoad; the table is skipped, so the file must not stay behind.
+                DeleteHeapLoadScript(heapPlan);
+                throw;
             }
 
             List<ImportItem> items = sequentialReason == null

@@ -723,7 +723,7 @@ case "${1:-}" in
         # (a) Setup: a compressed primary key, a filtered index and a foreign key referencing split.Text.
         create_target_db BcpJsonSplitHeap
         sql -d BcpJsonSplitHeap -Q "ALTER INDEX PK_Big ON split.Big REBUILD WITH (DATA_COMPRESSION = PAGE);
-            CREATE INDEX IX_Big_Note ON split.Big (Note) WHERE Note IS NOT NULL;
+            CREATE INDEX IX_Big_Note ON split.Big (Note) WHERE Note IS NOT NULL WITH (FILLFACTOR = 80, ALLOW_PAGE_LOCKS = OFF, STATISTICS_NORECOMPUTE = ON);
             CREATE TABLE split.TextRef (Code VARCHAR(30) COLLATE Latin1_General_CS_AS NOT NULL CONSTRAINT FK_TextRef_Text REFERENCES split.Text (Code));"
         heap_indexes BcpJsonSplitHeap > "$WORK/heap-indexes-before.txt"
         cat "$WORK/heap-indexes-before.txt"
@@ -810,12 +810,30 @@ case "${1:-}" in
             cat "$WORK/split-heap-dup2.log"; echo "::error::An import into a marked table succeeded"; exit 1
         fi
         cat "$WORK/split-heap-dup2.log"
-        grep -qF "split.Descending: an interrupted --load-as-heap run left it without some of its indexes; run the script in " "$WORK/split-heap-dup2.log" \
+        grep -qF "split.Descending: an earlier --load-as-heap run left it without some of its indexes; run the script in " "$WORK/split-heap-dup2.log" \
             || { echo "::error::The interrupted run was not reported"; exit 1; }
         grep -qF "split.Descending.load-as-heap.sql (it recreates what is missing and removes the markers; if the file is lost, the statements are in the extended properties bcpjson_load_as_heap_*, drop those after running them), then import again." "$WORK/split-heap-dup2.log" \
             || { echo "::error::The interrupted-run message is incomplete"; exit 1; }
         [ "$(scalar BcpJsonSplitHeap "SELECT COUNT(*) FROM split.Descending;")" = "20000" ] || { echo "::error::The refused import changed split.Descending"; exit 1; }
         echo "Load as heap (f): duplicate key reported, script and markers kept, the next import refused, 20,000 rows untouched."
+
+        # (f1) The recovery script, run by sqlcmd without -I and without -b (it sets its own options and USEs the
+        #      database): with the duplicates still there the key fails, so the markers stay and RAISERROR says why.
+        desc_markers() { scalar BcpJsonSplitHeap "SELECT COUNT(*) FROM sys.extended_properties WHERE class = 1 AND minor_id = 0 AND major_id = OBJECT_ID(N'split.Descending') AND name LIKE N'bcpjson[_]load[_]as[_]heap[_]%';"; }
+        run_recovery() { sqlcmd -S "$SQL_SERVER" -U "$SQL_USER" -C -f 65001 -i "$hd/split.Descending.load-as-heap.sql" > "$1" 2>&1 || true; cat "$1"; }
+        run_recovery "$WORK/split-heap-recovery1.log"
+        [ "$(desc_markers)" != "0" ] || { echo "::error::The recovery script dropped the markers although PK_Descending is missing"; exit 1; }
+        grep -qF "Not every index exists; the markers are kept. Fix the cause and run this script again." "$WORK/split-heap-recovery1.log" \
+            || { echo "::error::The recovery script did not report the missing index"; exit 1; }
+        # Without the duplicates the script recreates the key and removes the markers.
+        sql -d BcpJsonSplitHeap -Q "TRUNCATE TABLE split.Descending;"
+        run_recovery "$WORK/split-heap-recovery2.log"
+        [ "$(scalar BcpJsonSplitHeap "SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID(N'split.Descending') AND name = N'PK_Descending' AND is_primary_key = 1;")" = "1" ] \
+            || { echo "::error::The recovery script did not recreate PK_Descending"; exit 1; }
+        [ "$(desc_markers)" = "0" ] || { echo "::error::The recovery script left markers behind"; exit 1; }
+        if grep -qF "Not every index exists" "$WORK/split-heap-recovery2.log"; then echo "::error::The second recovery run still reported a missing index"; exit 1; fi
+        rm -f "$hd/split.Descending.load-as-heap.sql"
+        echo "Load as heap (f1): recovery script kept the markers while the key failed, then recreated it and removed them."
 
         # (f2) A duplicate in a unique nonclustered index: the clustered index comes back, the unique one does not.
         sql -d BcpJsonSplitHeap -Q "SET NOCOUNT ON; DECLARE @n SYSNAME;
@@ -836,6 +854,7 @@ case "${1:-}" in
             cat "$WORK/split-heap-dup-ux.log"; echo "::error::The import succeeded although UX_Desc_Val could not be recreated"; exit 1
         fi
         cat "$WORK/split-heap-dup-ux.log"
+        if grep -qF "left it without some of its indexes" "$WORK/split-heap-dup-ux.log"; then echo "::error::The import after the recovery script was refused"; exit 1; fi
         grep -qF "split.Descending: Could not recreate UX_Desc_Val: " "$WORK/split-heap-dup-ux.log" || { echo "::error::The failed recreation of UX_Desc_Val was not reported"; exit 1; }
         [ "$(scalar BcpJsonSplitHeap "SELECT index_id FROM sys.indexes WHERE object_id = OBJECT_ID(N'split.Descending') AND name = N'PK_Descending';")" = "1" ] \
             || { echo "::error::PK_Descending is not the clustered index after the failed UX_Desc_Val"; exit 1; }
@@ -860,7 +879,7 @@ case "${1:-}" in
         chmod a-w "$hr"
         bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitHeap --file-format json --max-tasks 4 --load-as-heap --truncate-target --source-path "$hr" --source-file '*.json' | tee "$WORK/split-heap-readonly.log"
         chmod u+w "$hr"
-        grep -qF "split.NullKey: not loaded as a heap: cannot write " "$WORK/split-heap-readonly.log" || { echo "::error::The unwritable folder was not reported"; exit 1; }
+        grep -qE "^split\.NullKey: not loaded as a heap: cannot write .*[^.]; disabling indexes instead\.$" "$WORK/split-heap-readonly.log" || { echo "::error::The unwritable folder was not reported (or the reason kept its full stop)"; exit 1; }
         [ "$(scalar BcpJsonSplitHeap "SELECT index_id FROM sys.indexes WHERE object_id = OBJECT_ID(N'split.NullKey') AND name = N'CX_NullKey_K';")" = "1" ] \
             || { echo "::error::CX_NullKey_K is not the clustered index"; exit 1; }
         [ "$(scalar BcpJsonSplitHeap "SELECT COUNT(*) FROM split.NullKey;")" = "20000" ] || { echo "::error::split.NullKey does not hold 20,000 rows"; exit 1; }
@@ -875,7 +894,7 @@ case "${1:-}" in
         cp "$sj"/split.Text.part*.json "$hlo/"
         : > "$hlo/split.Text.load-as-heap.sql"
         bcpjson import "${TARGET[@]}" --target-database BcpJsonSplitHeapBcp --file-format json --truncate-target --source-path "$hlo" --source-file '*' | tee "$WORK/split-heap-leftover.log"
-        grep -qE "split\.Text\.load-as-heap\.sql is left over; the target is whole, delete it\.$" "$WORK/split-heap-leftover.log" \
+        grep -qE "split\.Text\.load-as-heap\.sql is left over and split\.Text has no markers; if all its indexes exist, delete it\.$" "$WORK/split-heap-leftover.log" \
             || { echo "::error::The leftover recovery script was not reported"; exit 1; }
         [ "$(scalar BcpJsonSplitHeapBcp "SELECT COUNT(*) FROM split.Text;")" = "3000" ] || { echo "::error::split.Text does not hold 3,000 rows"; exit 1; }
         echo "Load as heap (i): leftover script reported, import succeeded."
