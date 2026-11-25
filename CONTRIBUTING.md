@@ -22,6 +22,7 @@ Use `-r win-arm64`, `-r linux-x64`, `-r linux-arm64` or `-r osx-arm64` for the o
   - relative links and their anchors resolve;
   - the user docs link only to files that ship in the release package.
 - **Round trips:** `tests/integration/roundtrip.sh` exports, imports and copies a test database, then compares JSON exports after each round trip. It runs in CI against SQL Server 2019, 2022 and 2025. To run it against any SQL Server, set `SQL_SERVER`, `SQL_PASSWORD` and `BCPJSON`. When fixing a data-fidelity bug, add the awkward data there.
+- **Documentation-only pull requests** (only `*.md`, `docs/`, `LICENSE` or `NOTICE` changed) skip the SQL Server round trips. The round-trip checks still report success, and the build and unit tests, including `DocsTests`, still run.
 - **Pull requests:** `master` is protected. Work on a branch and merge through a pull request once the required checks pass: two builds and the three round trips.
 
 ## Documentation
