@@ -1,6 +1,6 @@
 ﻿namespace bcpJson
 {
-    /// <summary>Names and text of the recovery script and markers used by import --load-as-heap.</summary>
+    /// <summary>Names and text of the recovery script and markers used by import and copy --load-as-heap.</summary>
     internal static class HeapLoadScript
     {
         internal const string Suffix = ".load-as-heap.sql";
@@ -29,16 +29,16 @@
         /// name reaches the SQL through <see cref="Program.SqlLiteral"/> / <see cref="Program.QuoteName"/>, and names in
         /// comments go through <see cref="CommentText"/>.
         /// </summary>
-        internal static string Build(string database, string schema, string table, IEnumerable<(string Name, string Statement)> indexes, DateTime utc)
+        internal static string Build(string verb, string database, string schema, string table, IEnumerable<(string Name, string Statement)> indexes, DateTime utc)
         {
             string objectLiteral = Program.SqlLiteral(Program.QuoteName(schema) + "." + Program.QuoteName(table));
             string databaseLiteral = Program.SqlLiteral(database);
             string inDatabase = "IF DB_NAME() = " + databaseLiteral;
             var sb = new System.Text.StringBuilder();
-            sb.Append("-- Written by bcpJson import --load-as-heap for ").Append(CommentText(schema + "." + table)).Append(" at ")
+            sb.Append("-- Written by bcpJson ").Append(verb).Append(" --load-as-heap for ").Append(CommentText(schema + "." + table)).Append(" at ")
                 .Append(utc.ToString("yyyy-MM-dd HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture)).Append(" UTC,\n");
             sb.Append("-- in database ").Append(CommentText(database)).Append(". If the database now has another name, replace its name in the USE line and the DB_NAME() checks.\n");
-            sb.Append("-- Run this script to recreate the indexes if the import was interrupted. It is rerunnable:\n");
+            sb.Append("-- Run this script to recreate the indexes if the ").Append(verb).Append(" was interrupted. It is rerunnable:\n");
             sb.Append("-- each index is created only if it is missing, and the markers are removed at the end, only once every index exists.\n");
             sb.Append("USE ").Append(Program.QuoteName(database)).Append(";\nGO\n");
             sb.Append(SetOptions).Append("\nGO\n");
