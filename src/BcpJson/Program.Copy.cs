@@ -47,6 +47,10 @@ namespace bcpJson
                 {
                     item.Work.Run(() => Interlocked.Add(ref totalrowCount, CopyItemRanges(setting, item)));
                 }
+                catch (InvalidOperationException ex) when (ex.InnerException is HeapLoadRefusedException)
+                {
+                    // TableWork wraps the failed preparation; CheckHeapLoadLeftovers has reported it already.
+                }
                 catch (Exception ex)
                 {
                     if (Interlocked.Exchange(ref item.Context.FailureReported, 1) == 0)
@@ -369,6 +373,9 @@ WHERE s.name = @schema AND t.name = @table;";
             public int SequentialClaimed;
             /// <summary>1 once a failed preparation was reported (every item of the table sees it).</summary>
             public int FailureReported;
+            /// <summary>--load-as-heap: set before the indexes are dropped, so the finish recreates them whatever happens next.</summary>
+            public HeapLoadTarget HeapTarget;
+            public HeapLoadPlan HeapPlan;
         }
 
         /// <summary>
@@ -467,6 +474,20 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.columns c INNER JOIN sys.types t ON t
             string sourceConnectionString = setting.SourceConnectionString();
             string targetConnectionString = setting.TargetConnectionString();
 
+            // A target left without some of its indexes by an earlier --load-as-heap run is refused before anything
+            // touches it, unless --drop-target replaces it anyway.
+            if (!setting.DropTarget)
+            {
+                using (var conn = SqlConnectionFactory.Create(targetConnectionString))
+                {
+                    conn.Open();
+                    if (!CheckHeapLoadLeftovers(conn, CopyHeapTarget(setting, tableRef.Schema, tableRef.Name, 0)))
+                    {
+                        throw new HeapLoadRefusedException();
+                    }
+                }
+            }
+
             using (var sourceSql = SqlConnectionFactory.Create(sourceConnectionString))
             using (var targetSql = SqlConnectionFactory.Create(targetConnectionString))
             {
@@ -519,6 +540,26 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.columns c INNER JOIN sys.types t ON t
                         }
                         objectId = (int)id;
                     }
+                    if (setting.LoadAsHeap && !context.Created)
+                    {
+                        // Copy has truncated the table already (PrepareTargetTable), so the heap load does not truncate.
+                        HeapLoadTarget heapTarget = CopyHeapTarget(setting, tableRef.Schema, tableRef.Name, objectId);
+                        HeapLoadPlan plan = PlanHeapLoad(conn, heapTarget, false, out string notReason);
+                        if (plan != null)
+                        {
+                            context.HeapTarget = heapTarget;
+                            context.HeapPlan = plan;
+                            PrepareHeapLoad(heapTarget, plan, parts);
+                            context.Mode = LoadMode.Parallel;
+                            context.Prepared = true;
+                            return;
+                        }
+                        if (notReason != null)
+                        {
+                            PostToConsole(string.Format("{0}: not loaded as a heap: {1}; loading it with its indexes.", tableRef.DisplayName, notReason), InfoLevel.Warning);
+                        }
+                    }
+
                     TargetShape shape = ReadTargetShape(conn, objectId, new HashSet<int>());
                     string sequentialReason = LoadPlanning.SequentialReason(shape, !setting.NoTableLock, false);
                     context.Mode = sequentialReason == null ? LoadMode.Parallel : LoadMode.Sequential;
@@ -528,6 +569,13 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.columns c INNER JOIN sys.types t ON t
                 }
             }
             context.Prepared = true;
+        }
+
+        /// <summary>Copy's load-as-heap view of a target table: never truncated by the heap load, scripts in --recovery-path.</summary>
+        private static HeapLoadTarget CopyHeapTarget(CopyOptions setting, string schema, string table, int objectId)
+        {
+            return new HeapLoadTarget("copy", setting.TargetConnectionString(), schema, table, objectId,
+                !setting.NoTableLock, false, string.IsNullOrWhiteSpace(setting.RecoveryPath) ? null : setting.RecoveryPath);
         }
 
         /// <summary>The source table through SMO.</summary>
@@ -603,6 +651,12 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.columns c INNER JOIN sys.types t ON t
         /// </summary>
         private static void FinishCopiedTable(CopyOptions setting, TableRef tableRef, CopyTableContext context, int parts, ConcurrentBag<TableRef> createdTables)
         {
+            // Load as heap: recreate the indexes whatever happened, even when the preparation failed after the drop.
+            if (context.HeapPlan != null)
+            {
+                FinishHeapLoad(context.HeapTarget, context.HeapPlan);
+            }
+
             if (!context.Prepared)
             {
                 return;   // the failed preparation is reported by the items

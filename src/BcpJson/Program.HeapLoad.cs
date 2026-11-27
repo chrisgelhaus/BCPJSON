@@ -22,6 +22,11 @@ namespace bcpJson
             public string ScriptPath;
         }
 
+        /// <summary>A table refused because an earlier --load-as-heap run marked it; the error is already reported.</summary>
+        private sealed class HeapLoadRefusedException : Exception
+        {
+        }
+
         /// <summary>
         /// The table load-as-heap works on, for import or copy. Verb names the command in messages and in the script.
         /// Truncate: the decision waives the emptiness rule and <see cref="PrepareHeapLoad"/> truncates first.
