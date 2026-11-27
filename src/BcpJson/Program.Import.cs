@@ -100,6 +100,13 @@ namespace bcpJson
             public string FileLabel(FileInfo file, string single) => Files.Count > 1 ? PartFiles.StemOf(file.Name) : single;
         }
 
+        /// <summary>The import's load-as-heap view of a table: the recovery script goes into --source-path.</summary>
+        private static HeapLoadTarget ImportHeapTarget(ImportOptions options, ImportTable table)
+        {
+            return new HeapLoadTarget("import", options.GetTargetConnectionString(), table.Schema, table.Table, table.ObjectId,
+                !options.NoTableLock, options.TruncateTarget, options.SourcePath);
+        }
+
         /// <summary>A unit of work: one file (parallel mode) or all files of a table in order (sequential mode).</summary>
         private sealed record ImportItem(ImportTable Table, List<FileInfo> Files)
         {
@@ -228,7 +235,8 @@ namespace bcpJson
             }
             firstFileOfTable[table.ObjectId] = files[0].Name;
 
-            if (!CheckHeapLoadLeftovers(conn, options, table))
+            HeapLoadTarget heapTarget = ImportHeapTarget(options, table);
+            if (!CheckHeapLoadLeftovers(conn, heapTarget))
             {
                 return new List<ImportItem>();
             }
@@ -256,7 +264,15 @@ namespace bcpJson
 
             bool staged = json && GetImportColumns(conn, table.ObjectId).Any(c => c.IsClrType);
             // --load-as-heap applies to split tables only; every other table loads as with --disable-indexes.
-            HeapLoadPlan heapPlan = options.LoadAsHeap && files.Count > 1 ? PlanHeapLoad(conn, options, table, staged) : null;
+            HeapLoadPlan heapPlan = null;
+            if (options.LoadAsHeap && files.Count > 1)
+            {
+                heapPlan = PlanHeapLoad(conn, heapTarget, staged, out string notReason);
+                if (notReason != null)
+                {
+                    PostToConsole(string.Format("{0}: not loaded as a heap: {1}; disabling indexes instead.", table.Label, notReason), InfoLevel.Warning);
+                }
+            }
 
             var toDisable = new List<IndexInfo>();
             TargetShape shape;
@@ -309,8 +325,8 @@ namespace bcpJson
             Action before, after;
             if (heapPlan != null)
             {
-                before = () => PrepareHeapLoad(options, table, heapPlan, files.Count);
-                after = () => FinishHeapLoad(options, table, heapPlan);
+                before = () => PrepareHeapLoad(heapTarget, heapPlan, files.Count);
+                after = () => FinishHeapLoad(heapTarget, heapPlan);
             }
             else
             {

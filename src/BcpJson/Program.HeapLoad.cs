@@ -22,26 +22,38 @@ namespace bcpJson
             public string ScriptPath;
         }
 
-        /// <summary>Full path of a table's recovery script in --source-path.</summary>
-        private static string HeapLoadScriptPath(ImportOptions options, ImportTable table)
+        /// <summary>A table refused because an earlier --load-as-heap run marked it; the error is already reported.</summary>
+        private sealed class HeapLoadRefusedException : Exception
         {
-            return Path.Combine(options.SourcePath, HeapLoadScript.FileName(table.Schema, table.Table));
         }
 
         /// <summary>
-        /// Planning checks every import makes: a target marked by an earlier --load-as-heap run is refused
+        /// The table load-as-heap works on, for import or copy. Verb names the command in messages and in the script.
+        /// Truncate: the decision waives the emptiness rule and <see cref="PrepareHeapLoad"/> truncates first.
+        /// ScriptFolder: where the recovery script goes (null: none known, copy without --recovery-path).
+        /// </summary>
+        private sealed record HeapLoadTarget(string Verb, string ConnectionString, string Schema, string Table, int ObjectId,
+            bool TableLock, bool Truncate, string ScriptFolder)
+        {
+            public string QualifiedName => QuoteName(Schema) + "." + QuoteName(Table);
+            public string Label => Schema + "." + Table;
+            public string ScriptPath => ScriptFolder == null ? null : Path.Combine(ScriptFolder, HeapLoadScript.FileName(Schema, Table));
+        }
+
+        /// <summary>
+        /// Planning checks every import and copy makes: a target marked by an earlier --load-as-heap run is refused
         /// (false); a recovery script without markers is only a warning.
         /// </summary>
-        private static bool CheckHeapLoadLeftovers(SqlConnection conn, ImportOptions options, ImportTable table)
+        private static bool CheckHeapLoadLeftovers(SqlConnection conn, HeapLoadTarget table)
         {
-            string scriptPath = HeapLoadScriptPath(options, table);
+            string scriptPath = table.ScriptPath;
             if (HasHeapLoadMarkers(conn, table.Schema, table.Table))
             {
-                PostToConsole(string.Format("{0}: an earlier --load-as-heap run left it without some of its indexes; run the script in {1} (it recreates what is missing and removes the markers; if the file is lost, the statements are in the extended properties {2}*, drop those after running them), then import again.",
-                    table.Label, scriptPath, HeapLoadScript.MarkerPrefix), InfoLevel.Error);
+                PostToConsole(string.Format("{0}: an earlier --load-as-heap run left it without some of its indexes; {1} (it recreates what is missing and removes the markers; if the file is lost, the statements are in the extended properties {2}*, drop those after running them), then {3} again.",
+                    table.Label, scriptPath == null ? "run its recovery script" : "run the script in " + scriptPath, HeapLoadScript.MarkerPrefix, table.Verb), InfoLevel.Error);
                 return false;
             }
-            if (File.Exists(scriptPath))
+            if (scriptPath != null && File.Exists(scriptPath))
             {
                 PostToConsole(string.Format("{0} is left over and {1} has no markers; if all its indexes exist, delete it.", scriptPath, table.Label), InfoLevel.Warning);
             }
@@ -50,26 +62,26 @@ namespace bcpJson
 
         /// <summary>
         /// Decides whether a split table is loaded as a heap. When it is, the recovery script has been written and the
-        /// plan is returned; otherwise null, with a warning when there is a reason (the table then loads as with --disable-indexes).
+        /// plan is returned; otherwise null, with <paramref name="notReason"/> set when the caller should warn (null for a heap target).
         /// </summary>
-        private static HeapLoadPlan PlanHeapLoad(SqlConnection conn, ImportOptions options, ImportTable table, bool staged)
+        private static HeapLoadPlan PlanHeapLoad(SqlConnection conn, HeapLoadTarget table, bool staged, out string notReason)
         {
             HeapLoadFacts facts = ReadHeapLoadFacts(conn, table.ObjectId);
             // The index-length check is the last rule, so the indexes are scripted only for a table that passes all others.
-            HeapLoadDecision decision = LoadPlanning.DecideHeapLoad(facts, !options.NoTableLock, staged, options.TruncateTarget, null);
+            HeapLoadDecision decision = LoadPlanning.DecideHeapLoad(facts, table.TableLock, staged, table.Truncate, null);
             HeapLoadPlan plan = null;
             if (decision.LoadAsHeap)
             {
                 string database = conn.Database;
-                List<SavedIndex> indexes = ScriptTargetIndexes(options, database, table.Schema, table.Table, HypotheticalIndexNames(conn, table.ObjectId));
+                List<SavedIndex> indexes = ScriptTargetIndexes(table.ConnectionString, database, table.Schema, table.Table, HypotheticalIndexNames(conn, table.ObjectId));
                 string tooLong = indexes.FirstOrDefault(i => i.Statement.Length > LoadPlanning.MaxIndexStatementLength)?.Name;
-                decision = LoadPlanning.DecideHeapLoad(facts, !options.NoTableLock, staged, options.TruncateTarget, tooLong);
+                decision = LoadPlanning.DecideHeapLoad(facts, table.TableLock, staged, table.Truncate, tooLong);
                 if (decision.LoadAsHeap)
                 {
-                    string path = HeapLoadScriptPath(options, table);
+                    string path = table.ScriptPath;
                     try
                     {
-                        HeapLoadScript.Write(path, HeapLoadScript.Build(database, table.Schema, table.Table, indexes.Select(i => (i.Name, i.Statement)), DateTime.UtcNow));
+                        HeapLoadScript.Write(path, HeapLoadScript.Build(table.Verb, database, table.Schema, table.Table, indexes.Select(i => (i.Name, i.Statement)), DateTime.UtcNow));
                         plan = new HeapLoadPlan { Indexes = indexes, ScriptPath = path };
                     }
                     catch (Exception ex)
@@ -78,10 +90,7 @@ namespace bcpJson
                     }
                 }
             }
-            if (plan == null && decision.Reason != null)
-            {
-                PostToConsole(string.Format("{0}: not loaded as a heap: {1}; disabling indexes instead.", table.Label, decision.Reason), InfoLevel.Warning);
-            }
+            notReason = plan == null ? decision.Reason : null;
             return plan;
         }
 
@@ -151,10 +160,8 @@ WHERE t.object_id = @objectId;";
         /// <see cref="IndexCreationRank"/>). Filegroup or partition scheme, compression, fill factor, filters and
         /// included columns are kept, hypothetical indexes skipped: unlike copy, the indexes come back in the same database.
         /// </summary>
-        static List<SavedIndex> ScriptTargetIndexes(ImportOptions options, string databaseName, string schema, string table, HashSet<string> hypothetical)
+        static List<SavedIndex> ScriptTargetIndexes(string connectionString, string databaseName, string schema, string table, HashSet<string> hypothetical)
         {
-            string connectionString = options.GetTargetConnectionString();
-
             var scripting = new ScriptingOptions
             {
                 IncludeIfNotExists = false,
@@ -261,12 +268,12 @@ WHERE ep.class = 1
         /// TableWork before: truncate (--truncate-target), check the table is still empty, log the statements, set the
         /// markers, then drop the nonclustered indexes (reverse creation order) and the clustered one.
         /// </summary>
-        static void PrepareHeapLoad(ImportOptions options, ImportTable table, HeapLoadPlan plan, int parts)
+        static void PrepareHeapLoad(HeapLoadTarget table, HeapLoadPlan plan, int parts)
         {
-            using (var conn = SqlConnectionFactory.Create(options.GetTargetConnectionString()))
+            using (var conn = SqlConnectionFactory.Create(table.ConnectionString))
             {
                 conn.Open();
-                if (options.TruncateTarget)
+                if (table.Truncate)
                 {
                     ExecuteSql(conn, "TRUNCATE TABLE " + table.QualifiedName + ";");
                     PostToConsole(string.Format("{0}: Truncate Complete.", table.Label));
@@ -307,13 +314,13 @@ WHERE ep.class = 1
         /// rebuilt again), then each missing nonclustered one. Markers and script are removed only when every saved
         /// index exists. Errors are reported here, never thrown.
         /// </summary>
-        static void FinishHeapLoad(ImportOptions options, ImportTable table, HeapLoadPlan plan)
+        static void FinishHeapLoad(HeapLoadTarget table, HeapLoadPlan plan)
         {
             SqlConnection conn = null;
             HashSet<string> existing;
             try
             {
-                conn = SqlConnectionFactory.Create(options.GetTargetConnectionString());
+                conn = SqlConnectionFactory.Create(table.ConnectionString);
                 conn.Open();
                 existing = ExistingIndexNames(conn, table.ObjectId);
             }
@@ -360,8 +367,8 @@ WHERE ep.class = 1
                 }
                 catch (Exception ex)
                 {
-                    PostToConsole(string.Format("{0}: every index exists, but its extended properties {1}* could not be removed: {2}. Remove them before the next import.",
-                        table.Label, HeapLoadScript.MarkerPrefix, ReasonOf(ex)), InfoLevel.Error);
+                    PostToConsole(string.Format("{0}: every index exists, but its extended properties {1}* could not be removed: {2}. Remove them before the next {3}.",
+                        table.Label, HeapLoadScript.MarkerPrefix, ReasonOf(ex), table.Verb), InfoLevel.Error);
                     return;
                 }
                 DeleteHeapLoadScript(plan);
@@ -374,7 +381,7 @@ WHERE ep.class = 1
             }
         }
 
-        private static bool TryCreateIndex(SqlConnection conn, ImportTable table, SavedIndex index, string scriptPath)
+        private static bool TryCreateIndex(SqlConnection conn, HeapLoadTarget table, SavedIndex index, string scriptPath)
         {
             try
             {

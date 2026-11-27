@@ -86,6 +86,12 @@ namespace bcpJson
 
         public List<SplitRequest> SplitRequests { get; private set; } = new List<SplitRequest>();
 
+        [Option("load-as-heap", Default = false, Required = false, HelpText = "For split tables copied into an existing table with a clustered index: drop its indexes, copy the parts in parallel into the heap, then recreate the indexes. Needs --recovery-path and --snapshot.")]
+        public bool LoadAsHeap { get; set; }
+
+        [Option("recovery-path", Required = false, HelpText = "Folder for the recovery scripts of --load-as-heap (created if missing).")]
+        public string RecoveryPath { get; set; }
+
         [Option("retries", Default = SqlConnectionFactory.DefaultRetries, Required = false, HelpText = "Retries when opening a connection fails transiently (network error, failover, throttling), with exponential backoff. Copies themselves are not retried. 0 = no retries.")]
         public int Retries { get; set; }
 
@@ -109,6 +115,24 @@ namespace bcpJson
 
             this.SplitRequests = requests;
             return (null, SplitRequest.SnapshotWarning(requests.Count > 0, this.Snapshot, "copy"));
+        }
+
+        /// <summary>The error for --load-as-heap without --recovery-path or --snapshot, or null. No connection is made.</summary>
+        internal string ValidateLoadAsHeap()
+        {
+            if (!this.LoadAsHeap)
+            {
+                return null;
+            }
+            if (string.IsNullOrWhiteSpace(this.RecoveryPath))
+            {
+                return "--load-as-heap needs --recovery-path: the folder where copy writes each table's recovery script.";
+            }
+            // A heap has no key to reject a row read twice by two ranges of a changing source; the duplicate would only
+            // surface when the primary key is recreated, leaving the table without its indexes.
+            return this.Snapshot
+                ? null
+                : "--load-as-heap needs --snapshot: without it, a row that moves to another key range during the copy is copied twice, and the primary key cannot be recreated on the heap.";
         }
 
         public bool Valid()
@@ -150,6 +174,27 @@ namespace bcpJson
             if (splitWarning != null)
             {
                 Program.PostToConsole(splitWarning, Program.InfoLevel.Warning);
+            }
+
+            string heapError = this.ValidateLoadAsHeap();
+            if (heapError != null)
+            {
+                Program.PostToConsole(heapError, Program.InfoLevel.Error);
+                return false;
+            }
+
+            if (!string.IsNullOrWhiteSpace(this.RecoveryPath))
+            {
+                try
+                {
+                    this.RecoveryPath = Path.GetFullPath(this.RecoveryPath);
+                    Directory.CreateDirectory(this.RecoveryPath);
+                }
+                catch (Exception ex)
+                {
+                    Program.PostToConsole(string.Format("Cannot create --recovery-path {0}: {1}", this.RecoveryPath, ex.Message), Program.InfoLevel.Error);
+                    return false;
+                }
             }
 
             if (!string.IsNullOrEmpty(this.Query))

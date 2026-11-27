@@ -21,7 +21,9 @@
 #                          clustered key, BCP parts, truncate once per table); import --load-as-heap (indexes dropped
 #                          and recreated exactly, fallbacks, failed load, duplicate keys, recovery script and markers,
 #                          --target-table, unwritable folder, leftover script); copy --split-tables (parallel parts
-#                          into new tables, one after another into clustered targets, CLR tables unsplit)
+#                          into new tables, one after another into clustered targets, CLR tables unsplit); copy
+#                          --load-as-heap into existing tables (indexes identical, foreign-key fallback, missing
+#                          --recovery-path, marked target refused)
 #
 # Table locking: JSON import and copy use the default (TABLOCK); BCP import uses --no-table-lock.
 #
@@ -944,6 +946,74 @@ case "${1:-}" in
         grep -qF "plain.Spatial: not split: copied through bcp (geography/geometry/hierarchyid columns)." "$WORK/split-copy-clr.log" \
             || { echo "::error::plain.Spatial was not reported as not split"; exit 1; }
         echo "Split copy: parallel parts into new heaps, one after another into clustered targets, CLR tables unsplit."
+
+        # 7. copy --load-as-heap into the existing tables of BcpJsonSplitCopy: their indexes are dropped, the parts load
+        #    in parallel into the heaps, and the indexes come back exactly.
+        # (a) A foreign key referencing split.Text keeps that table from qualifying.
+        sql -d BcpJsonSplitCopy -Q "CREATE TABLE split.TextRef (Code VARCHAR(30) COLLATE Latin1_General_CS_AS NOT NULL CONSTRAINT FK_TextRef_Text REFERENCES split.Text (Code));"
+        heap_indexes BcpJsonSplitCopy > "$WORK/copy-heap-before.txt"
+        cr="$WORK/copy-recovery"
+        rm -rf "$cr"
+
+        # (b) Every split table but split.Text (a referenced table cannot be truncated), with --truncate-target.
+        ch="$WORK/split-copy-heap.log"
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy --max-tasks 4 \
+            --include-schemas split --exclude-tables split.Text --split-tables "split.*:4" --snapshot --truncate-target \
+            --load-as-heap --recovery-path "$cr" | tee "$ch"
+        assert_no_snapshots
+        grep -qE "^split\.Big: [0-9]+ index\(es\) dropped; loading 4 parts in parallel as a heap\.$" "$ch" \
+            || { echo "::error::copy --load-as-heap did not load split.Big as a heap"; exit 1; }
+        grep -qE "^split\.Big: clustered index PK_Big and [0-9]+ other index\(es\) recreated\.$" "$ch" \
+            || { echo "::error::copy --load-as-heap did not recreate the indexes of split.Big"; exit 1; }
+        grep -qF "split.PartedCci: not loaded as a heap: clustered columnstore; loading it with its indexes." "$ch" \
+            || { echo "::error::split.PartedCci did not fall back with the copy warning"; exit 1; }
+        if grep -qF "split.Big: 4 parts, loading one after another" "$ch"; then echo "::error::split.Big was copied one part after another"; exit 1; fi
+
+        # (c) split.Text, emptied by hand: referenced by a foreign key, so it falls back and loads with its indexes.
+        sql -d BcpJsonSplitCopy -Q "DELETE FROM split.Text;"
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy --max-tasks 4 \
+            --include-tables split.Text --split-tables "split.Text:4" --snapshot --load-as-heap --recovery-path "$cr" | tee "$WORK/split-copy-heap-text.log"
+        grep -qF "split.Text: not loaded as a heap: referenced by foreign key FK_TextRef_Text; loading it with its indexes." "$WORK/split-copy-heap-text.log" \
+            || { echo "::error::split.Text did not fall back with the copy warning"; exit 1; }
+
+        # (d) Indexes identical, nothing left behind, data identical.
+        heap_indexes BcpJsonSplitCopy > "$WORK/copy-heap-after.txt"
+        diff -u "$WORK/copy-heap-before.txt" "$WORK/copy-heap-after.txt" || { echo "::error::copy --load-as-heap did not recreate the indexes exactly"; exit 1; }
+        if ls "$cr"/*.load-as-heap.sql > /dev/null 2>&1; then echo "::error::A recovery script was left in $cr"; ls -l "$cr"; exit 1; fi
+        [ "$(markers BcpJsonSplitCopy)" = "0" ] || { echo "::error::copy --load-as-heap left markers behind"; exit 1; }
+        export_json BcpJsonSplitCopy "$WORK/split-copy-heap" --include-schemas split --exclude-tables split.TextRef
+        compare_exact "$sjs" "$WORK/split-copy-heap"
+        echo "Copy load as heap (a-d): heaps loaded in parallel, fallbacks warned, indexes identical, no script, no markers, data identical."
+
+        # (e) --load-as-heap without --recovery-path, or without --snapshot, is refused before anything is copied.
+        if bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy \
+            --include-tables split.Big --split-tables "split.Big:4" --load-as-heap > "$WORK/split-copy-heap-nopath.log" 2>&1; then
+            cat "$WORK/split-copy-heap-nopath.log"; echo "::error::copy --load-as-heap without --recovery-path succeeded"; exit 1
+        fi
+        grep -qF -- "--load-as-heap needs --recovery-path: the folder where copy writes each table's recovery script." "$WORK/split-copy-heap-nopath.log" \
+            || { cat "$WORK/split-copy-heap-nopath.log"; echo "::error::copy did not explain the missing --recovery-path"; exit 1; }
+        if bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy \
+            --include-tables split.Big --split-tables "split.Big:4" --load-as-heap --recovery-path "$cr" > "$WORK/split-copy-heap-nosnap.log" 2>&1; then
+            cat "$WORK/split-copy-heap-nosnap.log"; echo "::error::copy --load-as-heap without --snapshot succeeded"; exit 1
+        fi
+        grep -qF -- "--load-as-heap needs --snapshot: " "$WORK/split-copy-heap-nosnap.log" \
+            || { cat "$WORK/split-copy-heap-nosnap.log"; echo "::error::copy did not explain the missing --snapshot"; exit 1; }
+
+        # (f) A target marked by an earlier run is refused by every copy and left unchanged.
+        sql -d BcpJsonSplitCopy -Q "EXEC sys.sp_addextendedproperty @name = N'bcpjson_load_as_heap_001', @value = N'x', @level0type = N'SCHEMA', @level0name = N'split', @level1type = N'TABLE', @level1name = N'Descending';"
+        desc_rows="$(scalar BcpJsonSplitCopy "SELECT COUNT(*) FROM split.Descending;")"
+        if bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy \
+            --include-tables split.Descending --truncate-target > "$WORK/split-copy-marked.log" 2>&1; then
+            cat "$WORK/split-copy-marked.log"; echo "::error::copy into a marked table succeeded"; exit 1
+        fi
+        cat "$WORK/split-copy-marked.log"
+        grep -qF "split.Descending: an earlier --load-as-heap run left it without some of its indexes; run its recovery script (" "$WORK/split-copy-marked.log" \
+            || { echo "::error::copy did not refuse the marked table"; exit 1; }
+        grep -qF "then copy again." "$WORK/split-copy-marked.log" || { echo "::error::the refusal does not say to copy again"; exit 1; }
+        [ "$(scalar BcpJsonSplitCopy "SELECT COUNT(*) FROM split.Descending;")" = "$desc_rows" ] \
+            || { echo "::error::the marked table was changed"; exit 1; }
+        sql -d BcpJsonSplitCopy -Q "EXEC sys.sp_dropextendedproperty @name = N'bcpjson_load_as_heap_001', @level0type = N'SCHEMA', @level0name = N'split', @level1type = N'TABLE', @level1name = N'Descending'; DROP TABLE split.TextRef;"
+        echo "Copy load as heap (e-f): missing --recovery-path refused, marked target refused and unchanged."
         ;;
 
     *)

@@ -158,7 +158,7 @@ The warning is `<table>: not loaded as a heap: <reason>; disabling indexes inste
 ### If an index cannot be recreated
 
 Before it drops anything, bcpJson takes two safeguards:
-- a recovery script, `<schema>.<table>.load-as-heap.sql`, in `--source-path`;
+- a recovery script, `<schema>.<table>.load-as-heap.sql`, in `--source-path` (import) or `--recovery-path` (copy);
 - one marker per index on the table, in extended properties.
 
 After the last part it creates the clustered index first. If that fails it stops, because nonclustered indexes built on a heap would be rebuilt again when the clustered index comes back. Then it creates each missing nonclustered index.
@@ -186,8 +186,20 @@ bcpjson copy --source-server sql01 --source-database Sales --target-server sql02
 ```
 
 - **New tables:** when `copy` creates the table, it first loads it as a heap, so the parts load in parallel. It builds the indexes after every part has arrived, as for any copy.
-- **Existing tables:** the load-mode rules in [Import the parts](#import-the-parts) apply.
+- **Existing tables:** the load-mode rules in [Import the parts](#import-the-parts) apply, unless `--load-as-heap` loads them as heaps (below).
 - **Failed parts:** keys, indexes and check constraints are created only when every part succeeded. Otherwise an error says `<table>: copy incomplete (<k> of <n> parts failed)`, and the table needs to be copied again.
+
+**Existing tables as heaps.** `copy --load-as-heap` works as [Load as a heap](#load-as-a-heap---load-as-heap) does for import, with the same rules for which tables qualify. Copy has no export folder, so `--recovery-path` names the folder for the recovery scripts. It is required with `--load-as-heap`, and created if missing. `--snapshot` is required too: on a source that changes during the copy, a row whose key moves to another range would be copied twice, and on a heap nothing rejects it until the primary key fails to come back.
+
+```powershell
+bcpjson copy --source-server sql01 --source-database Sales --target-server sql02 --target-database Sales `
+             --include-tables dbo.OrderHistory --split-tables dbo.OrderHistory:16 --truncate-target --snapshot `
+             --load-as-heap --recovery-path D:\bcpjson\recovery --max-tasks 16
+```
+
+- **Tables that don't qualify** load with their indexes, as without the option, and warn: `<table>: not loaded as a heap: <reason>; loading it with its indexes.` copy has no `--disable-indexes`.
+- **No effect** on tables copy creates (they load as heaps anyway), on unsplit tables and on tables copied through bcp.
+- **One folder per target database:** the script is named `<schema>.<table>.load-as-heap.sql`, without the database. Two copies into different databases with the same `--recovery-path` replace each other's scripts.
 
 ## If something goes wrong
 
