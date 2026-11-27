@@ -66,6 +66,15 @@
             return SequentialReason(shape, tableLock, stagedClrColumns) == null ? LoadMode.Parallel : LoadMode.Sequential;
         }
 
+        /// <summary>
+        /// Whether copy disables a target's nonclustered indexes: only on a table that existed before the copy, with
+        /// --disable-indexes or as the --load-as-heap fallback (a table loaded as a heap has its indexes dropped instead).
+        /// </summary>
+        internal static bool CopyDisablesIndexes(bool created, bool disableIndexes, bool loadedAsHeap, bool loadAsHeap)
+        {
+            return !created && !loadedAsHeap && (disableIndexes || loadAsHeap);
+        }
+
         /// <summary>Enabled nonclustered indexes (rowstore, columnstore, XML, spatial, hash) except the primary key and indexes a foreign key references.</summary>
         internal static List<IndexInfo> IndexesToDisable(IEnumerable<IndexInfo> indexes)
         {

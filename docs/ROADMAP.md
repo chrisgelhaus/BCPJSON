@@ -87,6 +87,14 @@ Design: `docs/superpowers/specs/2026-11-25-docs-reorganization-design.md`.
 
 - **Deferred from the `copy --load-as-heap` review:** a shared `--recovery-path` can delete another running copy's script (the markers still hold the statements; the guide says only that scripts are replaced); every copy opens one extra target connection per table for the marker check; CI step 7 asserts the heap load by log line only for `split.Big`, assumes copy splits `split.Text` into 2+ parts, and has no failed-part case for copy (shared with import's); the spec's preparation order (truncate after the decision) differs from the code (copy truncates first; same result).
 
+## Done after v2.9.0 (`copy --disable-indexes`)
+
+Design: `docs/superpowers/specs/2026-11-27-copy-disable-indexes-design.md`.
+
+- `copy --disable-indexes` disables the nonclustered indexes of existing target tables (except the primary key and foreign-key-referenced ones) before the first part and rebuilds them after the last, also when a part failed. It uses import's rules and rebuild code (`RebuildDisabledIndexes`, now shared). A split heap whose indexes are all disabled loads its parts in parallel; a clustered table still loads one part after another.
+- `copy --load-as-heap` now falls back to it, as import does: unsplit existing tables and split tables that do not qualify warn `not loaded as a heap: <reason>; disabling indexes instead.` (v2.9.0 loaded them with their indexes).
+- CI: `roundtrip.sh split` step 6b; step 7's fallback greps use the new message.
+
 ## Backlog: large tables, later
 
 From the design's "Later" list:
@@ -106,8 +114,8 @@ From the design's "Later" list:
   | Option 2: heap load 12.9 + clustered PK 3.2 + two nonclustered 1.7 + 2.6 | 20.4 | 245k |
 
   Option 2 is 33% faster than `--disable-indexes` and 2.6x a plain load; at 1,000,000 rows the two were even (5.0 s against 4.8 s). One run on a small runner with presorted keys: the ratios are indicative.
-- **Later, from the load-as-heap design:** import creating missing tables from table definitions saved by export (such tables would then load heap first, like `copy`); `copy --disable-indexes` for existing targets (`copy --load-as-heap` is done, see above); dropping and recreating the foreign keys of referencing tables (rejected 2026-11-23); clustered columnstore targets.
-- `--split-above` (automatic size threshold), per-table `--disable-indexes`, and `--disable-indexes` for `copy` into existing tables.
+- **Later, from the load-as-heap design:** import creating missing tables from table definitions saved by export (such tables would then load heap first, like `copy`); (`copy --load-as-heap` and `copy --disable-indexes` are done, see above); dropping and recreating the foreign keys of referencing tables (rejected 2026-11-23); clustered columnstore targets.
+- `--split-above` (automatic size threshold) and per-table `--disable-indexes`.
 - **Multi-column ranges** for skewed leading keys (one dominant value), and splitting unpartitioned heaps.
 - Splitting by row count, if a use case appears.
 

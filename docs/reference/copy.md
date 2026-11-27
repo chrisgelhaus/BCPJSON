@@ -29,7 +29,8 @@ How-to: [Copy between servers](../guides/copy-between-servers.md), [Large tables
 | `--drop-target` | off | Drop target tables that exist and create them again from the source. Foreign keys defined on those tables are dropped first, so a copy made with `--foreign-keys` can be refreshed. |
 | `--truncate-target` | off | Empty target tables that exist before copying. |
 | `--no-table-lock` | off (tables are locked) | Load without a table lock (`TABLOCK`). See [Load into a live database](../guides/load-into-a-live-database.md). |
-| `--load-as-heap` | off | For split tables copied into an existing table with a clustered index: drop its indexes, copy the parts in parallel into the heap, then recreate the indexes. Needs `--recovery-path` and `--snapshot`. See [Large tables](../guides/large-tables.md#copy). |
+| `--load-as-heap` | off | For split tables copied into an existing table with a clustered index: drop its indexes, copy the parts in parallel into the heap, then recreate the indexes. Other existing tables load as with `--disable-indexes`. Needs `--recovery-path` and `--snapshot`. See [Large tables](../guides/large-tables.md#copy). |
+| `--disable-indexes` | off | Disable the nonclustered indexes of existing target tables during the copy, except the primary key and indexes used by foreign keys, and rebuild them afterwards. See [Large tables](../guides/large-tables.md#copy). |
 | `--recovery-path` | | Folder for the recovery script of each table copied with `--load-as-heap`; created if missing. See [The load-as-heap recovery script](../guides/recover-a-failed-run.md#the-load-as-heap-recovery-script). |
 
 ## Tables

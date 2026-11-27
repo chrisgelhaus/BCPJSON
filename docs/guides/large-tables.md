@@ -187,6 +187,7 @@ bcpjson copy --source-server sql01 --source-database Sales --target-server sql02
 
 - **New tables:** when `copy` creates the table, it first loads it as a heap, so the parts load in parallel. It builds the indexes after every part has arrived, as for any copy.
 - **Existing tables:** the load-mode rules in [Import the parts](#import-the-parts) apply, unless `--load-as-heap` loads them as heaps (below).
+- **`--disable-indexes`:** works on existing target tables, split or not, as described in [Load first, index afterwards](#load-first-index-afterwards---disable-indexes). The indexes are rebuilt after the last part, also when a part failed. Tables copy creates are not affected.
 - **Failed parts:** keys, indexes and check constraints are created only when every part succeeded. Otherwise an error says `<table>: copy incomplete (<k> of <n> parts failed)`, and the table needs to be copied again.
 
 **Existing tables as heaps.** `copy --load-as-heap` works as [Load as a heap](#load-as-a-heap---load-as-heap) does for import, with the same rules for which tables qualify. Copy has no export folder, so `--recovery-path` names the folder for the recovery scripts. It is required with `--load-as-heap`, and created if missing. `--snapshot` is required too: on a source that changes during the copy, a row whose key moves to another range would be copied twice, and on a heap nothing rejects it until the primary key fails to come back.
@@ -197,8 +198,8 @@ bcpjson copy --source-server sql01 --source-database Sales --target-server sql02
              --load-as-heap --recovery-path D:\bcpjson\recovery --max-tasks 16
 ```
 
-- **Tables that don't qualify** load with their indexes, as without the option, and warn: `<table>: not loaded as a heap: <reason>; loading it with its indexes.` copy has no `--disable-indexes`.
-- **No effect** on tables copy creates (they load as heaps anyway), on unsplit tables and on tables copied through bcp.
+- **Tables that don't qualify,** and unsplit existing tables, load as with `--disable-indexes`, as on import. A split table that doesn't qualify warns: `<table>: not loaded as a heap: <reason>; disabling indexes instead.`
+- **No effect** on tables copy creates (they load as heaps anyway).
 - **One folder per target database:** the script is named `<schema>.<table>.load-as-heap.sql`, without the database. Two copies into different databases with the same `--recovery-path` replace each other's scripts.
 
 ## If something goes wrong

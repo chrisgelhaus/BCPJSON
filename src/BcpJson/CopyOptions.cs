@@ -86,7 +86,10 @@ namespace bcpJson
 
         public List<SplitRequest> SplitRequests { get; private set; } = new List<SplitRequest>();
 
-        [Option("load-as-heap", Default = false, Required = false, HelpText = "For split tables copied into an existing table with a clustered index: drop its indexes, copy the parts in parallel into the heap, then recreate the indexes. Needs --recovery-path and --snapshot.")]
+        [Option("disable-indexes", Default = false, Required = false, HelpText = "Disable nonclustered indexes of existing target tables (except the primary key and indexes used by foreign keys) during the copy and rebuild them afterwards.")]
+        public bool DisableIndexes { get; set; }
+
+        [Option("load-as-heap", Default = false, Required = false, HelpText = "For split tables copied into an existing table with a clustered index: drop its indexes, copy the parts in parallel into the heap, then recreate the indexes. Other existing tables load as with --disable-indexes. Needs --recovery-path and --snapshot.")]
         public bool LoadAsHeap { get; set; }
 
         [Option("recovery-path", Required = false, HelpText = "Folder for the recovery scripts of --load-as-heap (created if missing).")]

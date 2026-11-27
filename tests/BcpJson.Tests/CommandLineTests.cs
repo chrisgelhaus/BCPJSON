@@ -162,6 +162,13 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Copy_disable_indexes_defaults_to_false()
+        {
+            Assert.False(Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b").DisableIndexes);
+            Assert.True(Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b", "--disable-indexes").DisableIndexes);
+        }
+
+        [Fact]
         public void Copy_load_as_heap_needs_recovery_path()
         {
             var without = Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b", "--load-as-heap");
