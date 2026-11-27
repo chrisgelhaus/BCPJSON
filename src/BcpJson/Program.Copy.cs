@@ -376,6 +376,9 @@ WHERE s.name = @schema AND t.name = @table;";
             /// <summary>--load-as-heap: set before the indexes are dropped, so the finish recreates them whatever happens next.</summary>
             public HeapLoadTarget HeapTarget;
             public HeapLoadPlan HeapPlan;
+            /// <summary>--disable-indexes (or the --load-as-heap fallback): set before the first index is disabled, so the finish rebuilds them whatever happens next.</summary>
+            public List<IndexInfo> Disabled;
+            public int TargetObjectId;
         }
 
         /// <summary>
@@ -524,7 +527,8 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.columns c INNER JOIN sys.types t ON t
                 }
             }
 
-            if (parts > 1)
+            bool mayDisable = !context.Created && (setting.DisableIndexes || setting.LoadAsHeap);
+            if (parts > 1 || mayDisable)
             {
                 using (var conn = SqlConnectionFactory.Create(targetConnectionString))
                 {
@@ -540,7 +544,8 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.columns c INNER JOIN sys.types t ON t
                         }
                         objectId = (int)id;
                     }
-                    if (setting.LoadAsHeap && !context.Created)
+                    context.TargetObjectId = objectId;
+                    if (parts > 1 && setting.LoadAsHeap && !context.Created)
                     {
                         // Copy has truncated the table already (PrepareTargetTable), so the heap load does not truncate.
                         HeapLoadTarget heapTarget = CopyHeapTarget(setting, tableRef.Schema, tableRef.Name, objectId);
@@ -556,16 +561,39 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.columns c INNER JOIN sys.types t ON t
                         }
                         if (notReason != null)
                         {
-                            PostToConsole(string.Format("{0}: not loaded as a heap: {1}; loading it with its indexes.", tableRef.DisplayName, notReason), InfoLevel.Warning);
+                            PostToConsole(string.Format("{0}: not loaded as a heap: {1}; disabling indexes instead.", tableRef.DisplayName, notReason), InfoLevel.Warning);
                         }
                     }
 
-                    TargetShape shape = ReadTargetShape(conn, objectId, new HashSet<int>());
-                    string sequentialReason = LoadPlanning.SequentialReason(shape, !setting.NoTableLock, false);
-                    context.Mode = sequentialReason == null ? LoadMode.Parallel : LoadMode.Sequential;
-                    PostToConsole(sequentialReason == null
-                        ? string.Format("{0}: {1} parts, loading in parallel.", tableRef.DisplayName, parts)
-                        : string.Format("{0}: {1} parts, loading one after another ({2}).", tableRef.DisplayName, parts, sequentialReason));
+                    var disabledIds = new HashSet<int>();
+                    if (LoadPlanning.CopyDisablesIndexes(context.Created, setting.DisableIndexes, false, setting.LoadAsHeap))
+                    {
+                        if (IsMemoryOptimized(conn, objectId))
+                        {
+                            PostToConsole(string.Format("{0}: memory-optimized; --disable-indexes ignored.", tableRef.DisplayName));
+                        }
+                        else
+                        {
+                            List<IndexInfo> toDisable = LoadPlanning.IndexesToDisable(ReadIndexes(conn, objectId));
+                            if (toDisable.Count > 0)
+                            {
+                                context.Disabled = toDisable;
+                                DisableIndexes(conn, context.TargetName, toDisable);
+                                PostToConsole(string.Format("{0}: Disabled indexes: {1}.", tableRef.DisplayName, string.Join(", ", toDisable.Select(i => i.Name))));
+                                disabledIds = toDisable.Select(i => i.IndexId).ToHashSet();
+                            }
+                        }
+                    }
+
+                    if (parts > 1)
+                    {
+                        TargetShape shape = ReadTargetShape(conn, objectId, disabledIds);
+                        string sequentialReason = LoadPlanning.SequentialReason(shape, !setting.NoTableLock, false);
+                        context.Mode = sequentialReason == null ? LoadMode.Parallel : LoadMode.Sequential;
+                        PostToConsole(sequentialReason == null
+                            ? string.Format("{0}: {1} parts, loading in parallel.", tableRef.DisplayName, parts)
+                            : string.Format("{0}: {1} parts, loading one after another ({2}).", tableRef.DisplayName, parts, sequentialReason));
+                    }
                 }
             }
             context.Prepared = true;
@@ -655,6 +683,12 @@ SELECT CASE WHEN EXISTS (SELECT 1 FROM sys.columns c INNER JOIN sys.types t ON t
             if (context.HeapPlan != null)
             {
                 FinishHeapLoad(context.HeapTarget, context.HeapPlan);
+            }
+
+            // Disabled indexes are rebuilt whatever happened, even when the preparation failed after disabling some.
+            if (context.Disabled?.Count > 0)
+            {
+                RebuildDisabledIndexes(setting.TargetConnectionString(), context.TargetObjectId, tableRef.DisplayName, context.TargetName, context.Disabled);
             }
 
             if (!context.Prepared)

@@ -79,6 +79,38 @@ ORDER BY i.index_id;";
             return indexes;
         }
 
+        /// <summary>
+        /// Runs once after a table's last file or part (import and copy), whether or not the load succeeded: rebuilds the indexes of
+        /// <paramref name="toDisable"/> that are disabled now (preparation may have stopped part way).
+        /// </summary>
+        static void RebuildDisabledIndexes(string connectionString, int objectId, string label, string qualifiedName, List<IndexInfo> toDisable)
+        {
+            var ids = new HashSet<int>(toDisable.Select(i => i.IndexId));
+            SqlConnection conn = null;
+            List<IndexInfo> disabled;
+            try
+            {
+                conn = SqlConnectionFactory.Create(connectionString);
+                conn.Open();
+                disabled = ReadIndexes(conn, objectId).Where(i => i.IsDisabled && ids.Contains(i.IndexId)).ToList();
+            }
+            catch (Exception ex)
+            {
+                // Reported here, not thrown: TableWork drops after's exception when the load failed too.
+                conn?.Dispose();
+                PostToConsole(RebuildNotStartedMessage(label, qualifiedName, toDisable.Select(i => i.Name), ex.Message), InfoLevel.Error);
+                return;
+            }
+
+            using (conn)
+            {
+                if (disabled.Count > 0)
+                {
+                    RebuildIndexes(conn, qualifiedName, disabled);
+                }
+            }
+        }
+
         static void DisableIndexes(SqlConnection conn, string qualifiedName, IEnumerable<IndexInfo> indexes)
         {
             foreach (IndexInfo index in indexes)

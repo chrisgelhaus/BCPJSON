@@ -22,6 +22,7 @@
 #                          and recreated exactly, fallbacks, failed load, duplicate keys, recovery script and markers,
 #                          --target-table, unwritable folder, leftover script); copy --split-tables (parallel parts
 #                          into new tables, one after another into clustered targets, CLR tables unsplit); copy
+#                          --disable-indexes into existing tables (disabled, rebuilt, identical); copy
 #                          --load-as-heap into existing tables (indexes identical, foreign-key fallback, missing
 #                          --recovery-path, marked target refused)
 #
@@ -947,6 +948,21 @@ case "${1:-}" in
             || { echo "::error::plain.Spatial was not reported as not split"; exit 1; }
         echo "Split copy: parallel parts into new heaps, one after another into clustered targets, CLR tables unsplit."
 
+        # 6b. copy --disable-indexes into the existing tables: nonclustered indexes are disabled for the load and rebuilt
+        #     afterwards; split.Big keeps its clustered key, so its parts still load one after another.
+        heap_indexes BcpJsonSplitCopy > "$WORK/copy-disable-before.txt"
+        cd6="$WORK/split-copy-disable.log"
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy --max-tasks 4 \
+            --include-schemas split --split-tables "split.Big:4" --snapshot --truncate-target --disable-indexes | tee "$cd6"
+        for line in "split.Big: Disabled indexes: " "split.Big: Rebuilt " "split.Big: 4 parts, loading one after another (clustered index)."; do
+            grep -qF "$line" "$cd6" || { echo "::error::copy --disable-indexes did not log: $line"; exit 1; }
+        done
+        heap_indexes BcpJsonSplitCopy > "$WORK/copy-disable-after.txt"
+        diff -u "$WORK/copy-disable-before.txt" "$WORK/copy-disable-after.txt" || { echo "::error::copy --disable-indexes left the indexes changed or disabled"; exit 1; }
+        export_json BcpJsonSplitCopy "$WORK/split-copy-disable" --include-schemas split
+        compare_exact "$sjs" "$WORK/split-copy-disable"
+        echo "Copy disable indexes (6b): disabled, rebuilt, identical; data identical."
+
         # 7. copy --load-as-heap into the existing tables of BcpJsonSplitCopy: their indexes are dropped, the parts load
         #    in parallel into the heaps, and the indexes come back exactly.
         # (a) A foreign key referencing split.Text keeps that table from qualifying.
@@ -965,7 +981,7 @@ case "${1:-}" in
             || { echo "::error::copy --load-as-heap did not load split.Big as a heap"; exit 1; }
         grep -qE "^split\.Big: clustered index PK_Big and [0-9]+ other index\(es\) recreated\.$" "$ch" \
             || { echo "::error::copy --load-as-heap did not recreate the indexes of split.Big"; exit 1; }
-        grep -qF "split.PartedCci: not loaded as a heap: clustered columnstore; loading it with its indexes." "$ch" \
+        grep -qF "split.PartedCci: not loaded as a heap: clustered columnstore; disabling indexes instead." "$ch" \
             || { echo "::error::split.PartedCci did not fall back with the copy warning"; exit 1; }
         if grep -qF "split.Big: 4 parts, loading one after another" "$ch"; then echo "::error::split.Big was copied one part after another"; exit 1; fi
 
@@ -973,7 +989,7 @@ case "${1:-}" in
         sql -d BcpJsonSplitCopy -Q "DELETE FROM split.Text;"
         bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy --max-tasks 4 \
             --include-tables split.Text --split-tables "split.Text:4" --snapshot --load-as-heap --recovery-path "$cr" | tee "$WORK/split-copy-heap-text.log"
-        grep -qF "split.Text: not loaded as a heap: referenced by foreign key FK_TextRef_Text; loading it with its indexes." "$WORK/split-copy-heap-text.log" \
+        grep -qF "split.Text: not loaded as a heap: referenced by foreign key FK_TextRef_Text; disabling indexes instead." "$WORK/split-copy-heap-text.log" \
             || { echo "::error::split.Text did not fall back with the copy warning"; exit 1; }
 
         # (d) Indexes identical, nothing left behind, data identical.

@@ -331,7 +331,7 @@ namespace bcpJson
             else
             {
                 before = options.TruncateTarget || toDisable.Count > 0 ? () => PrepareImportTarget(options, table, toDisable) : null;
-                after = toDisable.Count > 0 ? () => RebuildDisabledIndexes(options, table, toDisable) : null;
+                after = toDisable.Count > 0 ? () => RebuildDisabledIndexes(options.GetTargetConnectionString(), table.ObjectId, table.Label, table.QualifiedName, toDisable) : null;
             }
             table.Work = new TableWork(table.Label, items.Count, before, after);
             return items;
@@ -352,38 +352,6 @@ namespace bcpJson
                 {
                     DisableIndexes(conn, table.QualifiedName, toDisable);
                     PostToConsole(string.Format("{0}: Disabled indexes: {1}.", table.Label, string.Join(", ", toDisable.Select(i => i.Name))));
-                }
-            }
-        }
-
-        /// <summary>
-        /// Runs once after a table's last file, whether or not the load succeeded: rebuilds the indexes of
-        /// <paramref name="toDisable"/> that are disabled now (preparation may have stopped part way).
-        /// </summary>
-        private static void RebuildDisabledIndexes(ImportOptions options, ImportTable table, List<IndexInfo> toDisable)
-        {
-            var ids = new HashSet<int>(toDisable.Select(i => i.IndexId));
-            SqlConnection conn = null;
-            List<IndexInfo> disabled;
-            try
-            {
-                conn = SqlConnectionFactory.Create(options.GetTargetConnectionString());
-                conn.Open();
-                disabled = ReadIndexes(conn, table.ObjectId).Where(i => i.IsDisabled && ids.Contains(i.IndexId)).ToList();
-            }
-            catch (Exception ex)
-            {
-                // Reported here, not thrown: TableWork drops after's exception when the load failed too.
-                conn?.Dispose();
-                PostToConsole(RebuildNotStartedMessage(table.Label, table.QualifiedName, toDisable.Select(i => i.Name), ex.Message), InfoLevel.Error);
-                return;
-            }
-
-            using (conn)
-            {
-                if (disabled.Count > 0)
-                {
-                    RebuildIndexes(conn, table.QualifiedName, disabled);
                 }
             }
         }
