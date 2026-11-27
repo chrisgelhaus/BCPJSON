@@ -82,6 +82,17 @@ namespace bcpJson.Tests
         private static IndexInfo Ix(int id, byte type, bool pk = false, bool disabled = false, bool fk = false, bool secXml = false)
             => new IndexInfo(id, "IX" + id, type, pk, disabled, fk, secXml);
 
+        [Theory]
+        [InlineData(false, true, false, false, true)]    // existing, --disable-indexes
+        [InlineData(false, false, false, true, true)]    // existing, --load-as-heap fallback (not split or did not qualify)
+        [InlineData(false, false, true, true, false)]    // loaded as a heap: indexes are dropped, not disabled
+        [InlineData(true, true, false, true, false)]     // created by this copy
+        [InlineData(false, false, false, false, false)]  // neither option
+        public void Copy_disables_indexes_only_on_existing_targets(bool created, bool disableIndexes, bool loadedAsHeap, bool loadAsHeap, bool expected)
+        {
+            Assert.Equal(expected, LoadPlanning.CopyDisablesIndexes(created, disableIndexes, loadedAsHeap, loadAsHeap));
+        }
+
         [Fact]
         public void Indexes_to_disable()
         {
