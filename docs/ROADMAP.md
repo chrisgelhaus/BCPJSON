@@ -76,13 +76,14 @@ Design: `docs/superpowers/specs/2026-11-23-load-as-heap-design.md` (with an "As 
 - **Follow-ups after v2.8.0 (PR #49, released in v2.8.1):** the recovery script checks `DB_NAME()` in every batch and says so when it runs in another database (renamed or restored target); control characters in names no longer reach its comments; the recovery guide recommends `sqlcmd -x`. CI now proves the script's own `SET QUOTED_IDENTIFIER ON` (a filtered index recreated by sqlcmd without `-I`), the wrong-database refusal, and that a hypothetical index is skipped. `benchmark.sh` has the row `import indexed, --load-as-heap`; it has not been run (the workflow runs only from master).
 - **Later (still in the backlog):** import creating missing tables, `copy --load-as-heap`, dropping foreign keys of referencing tables, clustered columnstore targets.
 
-## Done after v2.8.1 (documentation reorganized, PR #51; docs-only CI, PR #52)
+## Done after v2.8.1 (documentation reorganized, PR #51; docs-only CI, PR #52; `copy --load-as-heap`)
 
 Design: `docs/superpowers/specs/2026-11-25-docs-reorganization-design.md`.
 
 - The 708-line README became a short index (110 lines). Six task guides are in `docs/guides`: back up, restore, copy between servers, large tables, recover a failed run, and load into a live database. A per-verb reference is in `docs/reference`, with common concepts, the manifest, the JSON format and the known limitations. Build, tests, releasing and the project layout moved to `CONTRIBUTING.md`.
 - `DocsTests` checks that every option is documented on its verb's page, that every `--option` named in the docs exists, and that links and anchors resolve, pointing only to files that ship in the packages. Release packages now carry `docs/guides` and `docs/reference`.
 - CI skips the SQL Server round trips for pull requests that change only documentation (`*.md`, `docs/`, `LICENSE`, `NOTICE`). A `changes` job decides; the round-trip jobs still report success under their required names but start no container (empty service image), so a docs PR finishes its round trips in seconds instead of about four minutes. The builds and their `DocsTests` always run; pushes to master, manual runs and release builds always run everything. Proven on a throwaway docs-only PR (#53, closed).
+- **`copy --load-as-heap`** (design `docs/superpowers/specs/2026-11-26-copy-load-as-heap-design.md`): existing targets of split tables load as heaps in copy too, with `--recovery-path` (required) as the folder for the recovery scripts. The heap-load code is shared with import through `HeapLoadTarget`; import is unchanged. A copy table that does not qualify loads with its indexes (copy has no `--disable-indexes`), and every copy refuses a marked target unless `--drop-target` replaces it. CI: `roundtrip.sh split` step 7.
 
 ## Backlog: large tables, later
 
@@ -103,7 +104,7 @@ From the design's "Later" list:
   | Option 2: heap load 12.9 + clustered PK 3.2 + two nonclustered 1.7 + 2.6 | 20.4 | 245k |
 
   Option 2 is 33% faster than `--disable-indexes` and 2.6x a plain load; at 1,000,000 rows the two were even (5.0 s against 4.8 s). One run on a small runner with presorted keys: the ratios are indicative.
-- **Later, from the load-as-heap design:** import creating missing tables from table definitions saved by export (such tables would then load heap first, like `copy`); `copy --load-as-heap` and `copy --disable-indexes` for existing targets; dropping and recreating the foreign keys of referencing tables (rejected 2026-11-23); clustered columnstore targets.
+- **Later, from the load-as-heap design:** import creating missing tables from table definitions saved by export (such tables would then load heap first, like `copy`); `copy --disable-indexes` for existing targets (`copy --load-as-heap` is done, see above); dropping and recreating the foreign keys of referencing tables (rejected 2026-11-23); clustered columnstore targets.
 - `--split-above` (automatic size threshold), per-table `--disable-indexes`, and `--disable-indexes` for `copy` into existing tables.
 - **Multi-column ranges** for skewed leading keys (one dominant value), and splitting unpartitioned heaps.
 - Splitting by row count, if a use case appears.
