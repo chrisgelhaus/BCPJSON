@@ -162,6 +162,19 @@ namespace bcpJson.Tests
         }
 
         [Fact]
+        public void Copy_load_as_heap_needs_recovery_path()
+        {
+            var without = Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b", "--load-as-heap");
+            Assert.True(without.LoadAsHeap);
+            Assert.Equal("--load-as-heap needs --recovery-path: the folder where copy writes each table's recovery script.", without.ValidateLoadAsHeap());
+            Assert.False(without.Valid());   // refused before any connection
+            var with = Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b", "--load-as-heap", "--recovery-path", "r");
+            Assert.Equal("r", with.RecoveryPath);
+            Assert.Null(with.ValidateLoadAsHeap());
+            Assert.Null(Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b").ValidateLoadAsHeap());
+        }
+
+        [Fact]
         public void Bad_split_tables_value_is_an_error_for_export_and_copy()
         {
             var export = Parsed<ExportOptions>("export", "--split-tables", "dbo.T:1");

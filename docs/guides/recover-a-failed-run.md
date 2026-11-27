@@ -69,8 +69,8 @@ bcpjson export --source-server sql01 --source-database Sales --file-format json 
 
 ## The load-as-heap recovery script
 
-`import --load-as-heap` drops a table's indexes and recreates them after the load (see [Load as a heap](large-tables.md#load-as-a-heap---load-as-heap)). If the run is interrupted, or an index cannot be recreated, two safeguards remain:
-- **The script:** `<schema>.<table>.load-as-heap.sql`, written into `--source-path` when the import was planned.
+`import --load-as-heap` and `copy --load-as-heap` drop a table's indexes and recreate them after the load (see [Load as a heap](large-tables.md#load-as-a-heap---load-as-heap)). If the run is interrupted, or an index cannot be recreated, two safeguards remain:
+- **The script:** `<schema>.<table>.load-as-heap.sql`, written into `--source-path` (import) or `--recovery-path` (copy) before any index is dropped.
 - **The markers:** one extended property on the table per index, named `bcpjson_load_as_heap_001`, `_002` and so on in creation order, each holding that index's statement.
 
 Both are removed only when every index exists again. The script file is never read as data; `--source-file "*"` skips it.
@@ -83,15 +83,16 @@ sqlcmd -S sql02 -x -f 65001 -i D:\exports\Sales\dbo.OrderHistory.load-as-heap.sq
 
 - **What it does:** it switches to the target database and sets the session options index statements need (`QUOTED_IDENTIFIER ON` and the others, for filtered indexes). Then it creates only the indexes that are missing. Finally, only if every index exists, it drops the markers. Otherwise it raises `Not every index exists; the markers are kept. Fix the cause and run this script again.` and keeps them. Running it again is safe.
 - **sqlcmd flags:** the script is UTF-8 with a byte order mark. `-f 65001` makes sqlcmd read non-ASCII names correctly. `-x` stops a `$(` in a name from being taken for a sqlcmd variable.
-- **Database check:** every batch checks that it runs in the database the import loaded. If that database has since been renamed or restored under another name, the script says so and changes nothing. Replace the database name in it (the `USE` line and the `DB_NAME()` checks) and run it again.
+- **Database check:** every batch checks that it runs in the database the run loaded. If that database has since been renamed or restored under another name, the script says so and changes nothing. Replace the database name in it (the `USE` line and the `DB_NAME()` checks) and run it again.
 - **Duplicate keys:** if the failure was duplicate keys, fix the data first, or the key will fail again.
 - **Tested:** CI runs the recovery script with sqlcmd, without `-I`, on SQL Server 2019, 2022 and 2025. The runs cover a filtered index and a run against the wrong database.
 
-**The next import refuses a marked table.** Every import, with or without `--load-as-heap`, checks its target tables for the markers. A marked table is an error, and is skipped unchanged:
+**The next import or copy refuses a marked table.** Every import and every copy, with or without `--load-as-heap`, checks its target tables for the markers. A marked table is an error, and is skipped unchanged (copy with `--drop-target` drops it instead):
 
 `<table>: an earlier --load-as-heap run left it without some of its indexes; run the script in <file> (it recreates what is missing and removes the markers; if the file is lost, the statements are in the extended properties bcpjson_load_as_heap_*, drop those after running them), then import again.`
 
-- **Which folder:** the path in the message is built from the current `--source-path`. If you import from another folder, use the script in the folder of the earlier run.
+- **copy's wording:** copy ends with `then copy again.` Without `--recovery-path` it says `run its recovery script` instead of naming a file.
+- **Which folder:** the path in the message is built from the current `--source-path` (or `--recovery-path`). If you run from another folder, use the script in the folder of the earlier run.
 - **Lost script:** if the script file is lost, the statements are in the table's extended properties `bcpjson_load_as_heap_*`. Run them, then drop the properties.
 
 **A script without markers** comes from a run that stopped before dropping anything. It only warns: `<file> is left over and <table> has no markers; if all its indexes exist, delete it.` Before deleting it, check that the indexes in the script all exist.
