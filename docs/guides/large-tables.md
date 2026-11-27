@@ -189,7 +189,7 @@ bcpjson copy --source-server sql01 --source-database Sales --target-server sql02
 - **Existing tables:** the load-mode rules in [Import the parts](#import-the-parts) apply, unless `--load-as-heap` loads them as heaps (below).
 - **Failed parts:** keys, indexes and check constraints are created only when every part succeeded. Otherwise an error says `<table>: copy incomplete (<k> of <n> parts failed)`, and the table needs to be copied again.
 
-**Existing tables as heaps.** `copy --load-as-heap` works as [Load as a heap](#load-as-a-heap---load-as-heap) does for import, with the same rules for which tables qualify. Copy has no export folder, so `--recovery-path` names the folder for the recovery scripts. It is required with `--load-as-heap`, and created if missing.
+**Existing tables as heaps.** `copy --load-as-heap` works as [Load as a heap](#load-as-a-heap---load-as-heap) does for import, with the same rules for which tables qualify. Copy has no export folder, so `--recovery-path` names the folder for the recovery scripts. It is required with `--load-as-heap`, and created if missing. `--snapshot` is required too: on a source that changes during the copy, a row whose key moves to another range would be copied twice, and on a heap nothing rejects it until the primary key fails to come back.
 
 ```powershell
 bcpjson copy --source-server sql01 --source-database Sales --target-server sql02 --target-database Sales `

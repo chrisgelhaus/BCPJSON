@@ -985,13 +985,19 @@ case "${1:-}" in
         compare_exact "$sjs" "$WORK/split-copy-heap"
         echo "Copy load as heap (a-d): heaps loaded in parallel, fallbacks warned, indexes identical, no script, no markers, data identical."
 
-        # (e) --load-as-heap without --recovery-path is refused before anything is copied.
+        # (e) --load-as-heap without --recovery-path, or without --snapshot, is refused before anything is copied.
         if bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy \
             --include-tables split.Big --split-tables "split.Big:4" --load-as-heap > "$WORK/split-copy-heap-nopath.log" 2>&1; then
             cat "$WORK/split-copy-heap-nopath.log"; echo "::error::copy --load-as-heap without --recovery-path succeeded"; exit 1
         fi
         grep -qF -- "--load-as-heap needs --recovery-path: the folder where copy writes each table's recovery script." "$WORK/split-copy-heap-nopath.log" \
             || { cat "$WORK/split-copy-heap-nopath.log"; echo "::error::copy did not explain the missing --recovery-path"; exit 1; }
+        if bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy \
+            --include-tables split.Big --split-tables "split.Big:4" --load-as-heap --recovery-path "$cr" > "$WORK/split-copy-heap-nosnap.log" 2>&1; then
+            cat "$WORK/split-copy-heap-nosnap.log"; echo "::error::copy --load-as-heap without --snapshot succeeded"; exit 1
+        fi
+        grep -qF -- "--load-as-heap needs --snapshot: " "$WORK/split-copy-heap-nosnap.log" \
+            || { cat "$WORK/split-copy-heap-nosnap.log"; echo "::error::copy did not explain the missing --snapshot"; exit 1; }
 
         # (f) A target marked by an earlier run is refused by every copy and left unchanged.
         sql -d BcpJsonSplitCopy -Q "EXEC sys.sp_addextendedproperty @name = N'bcpjson_load_as_heap_001', @value = N'x', @level0type = N'SCHEMA', @level0name = N'split', @level1type = N'TABLE', @level1name = N'Descending';"

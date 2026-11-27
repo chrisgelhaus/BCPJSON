@@ -168,10 +168,18 @@ namespace bcpJson.Tests
             Assert.True(without.LoadAsHeap);
             Assert.Equal("--load-as-heap needs --recovery-path: the folder where copy writes each table's recovery script.", without.ValidateLoadAsHeap());
             Assert.False(without.Valid());   // refused before any connection
-            var with = Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b", "--load-as-heap", "--recovery-path", "r");
+            var with = Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b", "--load-as-heap", "--recovery-path", "r", "--snapshot");
             Assert.Equal("r", with.RecoveryPath);
             Assert.Null(with.ValidateLoadAsHeap());
             Assert.Null(Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b").ValidateLoadAsHeap());
+        }
+
+        [Fact]
+        public void Copy_load_as_heap_needs_snapshot()
+        {
+            var opts = Parsed<CopyOptions>("copy", "--source-database", "a", "--target-database", "b", "--load-as-heap", "--recovery-path", "r");
+            Assert.Equal("--load-as-heap needs --snapshot: without it, a row that moves to another key range during the copy is copied twice, and the primary key cannot be recreated on the heap.", opts.ValidateLoadAsHeap());
+            Assert.False(opts.Valid());   // refused before any connection
         }
 
         [Fact]
