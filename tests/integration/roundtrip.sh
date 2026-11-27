@@ -949,24 +949,32 @@ case "${1:-}" in
         echo "Split copy: parallel parts into new heaps, one after another into clustered targets, CLR tables unsplit."
 
         # 6b. copy --disable-indexes into the existing tables: nonclustered indexes are disabled for the load and rebuilt
-        #     afterwards; split.Big keeps its clustered key, so its parts still load one after another.
+        #     afterwards; split.Big keeps its clustered key, so its parts still load one after another, while the heap
+        #     split.PartedHeap, given a nonclustered index here, loads its parts in parallel once that index is disabled.
+        sql -d BcpJsonSplitCopy -Q "CREATE INDEX IX_PartedHeap_Val ON split.PartedHeap (Val);"
         heap_indexes BcpJsonSplitCopy > "$WORK/copy-disable-before.txt"
         cd6="$WORK/split-copy-disable.log"
         bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy --max-tasks 4 \
-            --include-schemas split --split-tables "split.Big:4" --snapshot --truncate-target --disable-indexes | tee "$cd6"
-        for line in "split.Big: Disabled indexes: " "split.Big: Rebuilt " "split.Big: 4 parts, loading one after another (clustered index)."; do
+            --include-schemas split --split-tables "split.Big:4,split.PartedHeap:4" --snapshot --truncate-target --disable-indexes | tee "$cd6"
+        for line in "split.Big: Disabled indexes: " "split.Big: Rebuilt " "split.Big: 4 parts, loading one after another (clustered index)." \
+                    "split.PartedHeap: Disabled indexes: IX_PartedHeap_Val."; do
             grep -qF "$line" "$cd6" || { echo "::error::copy --disable-indexes did not log: $line"; exit 1; }
         done
+        grep -qE "^split\.PartedHeap: [0-9]+ parts, loading in parallel\.$" "$cd6" \
+            || { echo "::error::split.PartedHeap did not load its parts in parallel with its index disabled"; exit 1; }
         heap_indexes BcpJsonSplitCopy > "$WORK/copy-disable-after.txt"
         diff -u "$WORK/copy-disable-before.txt" "$WORK/copy-disable-after.txt" || { echo "::error::copy --disable-indexes left the indexes changed or disabled"; exit 1; }
         export_json BcpJsonSplitCopy "$WORK/split-copy-disable" --include-schemas split
         compare_exact "$sjs" "$WORK/split-copy-disable"
+        sql -d BcpJsonSplitCopy -Q "DROP INDEX IX_PartedHeap_Val ON split.PartedHeap;"
         echo "Copy disable indexes (6b): disabled, rebuilt, identical; data identical."
 
         # 7. copy --load-as-heap into the existing tables of BcpJsonSplitCopy: their indexes are dropped, the parts load
         #    in parallel into the heaps, and the indexes come back exactly.
-        # (a) A foreign key referencing split.Text keeps that table from qualifying.
-        sql -d BcpJsonSplitCopy -Q "CREATE TABLE split.TextRef (Code VARCHAR(30) COLLATE Latin1_General_CS_AS NOT NULL CONSTRAINT FK_TextRef_Text REFERENCES split.Text (Code));"
+        # (a) A foreign key referencing split.Text keeps that table from qualifying; its nonclustered IX_Text_Seq shows the
+        #     fallback disables indexes.
+        sql -d BcpJsonSplitCopy -Q "CREATE TABLE split.TextRef (Code VARCHAR(30) COLLATE Latin1_General_CS_AS NOT NULL CONSTRAINT FK_TextRef_Text REFERENCES split.Text (Code));
+            CREATE INDEX IX_Text_Seq ON split.Text (Seq);"
         heap_indexes BcpJsonSplitCopy > "$WORK/copy-heap-before.txt"
         cr="$WORK/copy-recovery"
         rm -rf "$cr"
@@ -991,6 +999,14 @@ case "${1:-}" in
             --include-tables split.Text --split-tables "split.Text:4" --snapshot --load-as-heap --recovery-path "$cr" | tee "$WORK/split-copy-heap-text.log"
         grep -qF "split.Text: not loaded as a heap: referenced by foreign key FK_TextRef_Text; disabling indexes instead." "$WORK/split-copy-heap-text.log" \
             || { echo "::error::split.Text did not fall back with the copy warning"; exit 1; }
+        grep -qF "split.Text: Disabled indexes: IX_Text_Seq." "$WORK/split-copy-heap-text.log" \
+            || { echo "::error::split.Text's fallback did not disable IX_Text_Seq"; exit 1; }
+        # (c2) Unsplit, --load-as-heap disables the indexes too, as on import.
+        sql -d BcpJsonSplitCopy -Q "DELETE FROM split.Text;"
+        bcpjson copy "${SOURCE[@]}" --source-database BcpJsonSource "${TARGET[@]}" --target-database BcpJsonSplitCopy \
+            --include-tables split.Text --snapshot --load-as-heap --recovery-path "$cr" | tee "$WORK/split-copy-heap-text-whole.log"
+        grep -qF "split.Text: Disabled indexes: IX_Text_Seq." "$WORK/split-copy-heap-text-whole.log" \
+            || { echo "::error::copy --load-as-heap did not disable the indexes of the unsplit split.Text"; exit 1; }
 
         # (d) Indexes identical, nothing left behind, data identical.
         heap_indexes BcpJsonSplitCopy > "$WORK/copy-heap-after.txt"
@@ -1028,7 +1044,7 @@ case "${1:-}" in
         grep -qF "then copy again." "$WORK/split-copy-marked.log" || { echo "::error::the refusal does not say to copy again"; exit 1; }
         [ "$(scalar BcpJsonSplitCopy "SELECT COUNT(*) FROM split.Descending;")" = "$desc_rows" ] \
             || { echo "::error::the marked table was changed"; exit 1; }
-        sql -d BcpJsonSplitCopy -Q "EXEC sys.sp_dropextendedproperty @name = N'bcpjson_load_as_heap_001', @level0type = N'SCHEMA', @level0name = N'split', @level1type = N'TABLE', @level1name = N'Descending'; DROP TABLE split.TextRef;"
+        sql -d BcpJsonSplitCopy -Q "EXEC sys.sp_dropextendedproperty @name = N'bcpjson_load_as_heap_001', @level0type = N'SCHEMA', @level0name = N'split', @level1type = N'TABLE', @level1name = N'Descending'; DROP TABLE split.TextRef; DROP INDEX IX_Text_Seq ON split.Text;"
         echo "Copy load as heap (e-f): missing --recovery-path refused, marked target refused and unchanged."
         ;;
 
