@@ -76,12 +76,13 @@ Design: `docs/superpowers/specs/2026-11-23-load-as-heap-design.md` (with an "As 
 - **Follow-ups after v2.8.0 (PR #49, released in v2.8.1):** the recovery script checks `DB_NAME()` in every batch and says so when it runs in another database (renamed or restored target); control characters in names no longer reach its comments; the recovery guide recommends `sqlcmd -x`. CI now proves the script's own `SET QUOTED_IDENTIFIER ON` (a filtered index recreated by sqlcmd without `-I`), the wrong-database refusal, and that a hypothetical index is skipped. `benchmark.sh` has the row `import indexed, --load-as-heap`; it has not been run (the workflow runs only from master).
 - **Later (still in the backlog):** import creating missing tables, `copy --load-as-heap`, dropping foreign keys of referencing tables, clustered columnstore targets.
 
-## Done after v2.8.1 (documentation reorganized)
+## Done after v2.8.1 (documentation reorganized, PR #51; docs-only CI, PR #52)
 
 Design: `docs/superpowers/specs/2026-11-25-docs-reorganization-design.md`.
 
 - The 708-line README became a short index (110 lines). Six task guides are in `docs/guides`: back up, restore, copy between servers, large tables, recover a failed run, and load into a live database. A per-verb reference is in `docs/reference`, with common concepts, the manifest, the JSON format and the known limitations. Build, tests, releasing and the project layout moved to `CONTRIBUTING.md`.
 - `DocsTests` checks that every option is documented on its verb's page, that every `--option` named in the docs exists, and that links and anchors resolve, pointing only to files that ship in the packages. Release packages now carry `docs/guides` and `docs/reference`.
+- CI skips the SQL Server round trips for pull requests that change only documentation (`*.md`, `docs/`, `LICENSE`, `NOTICE`). A `changes` job decides; the round-trip jobs still report success under their required names but start no container (empty service image), so a docs PR finishes its round trips in seconds instead of about four minutes. The builds and their `DocsTests` always run; pushes to master, manual runs and release builds always run everything. Proven on a throwaway docs-only PR (#53, closed).
 
 ## Backlog: large tables, later
 
